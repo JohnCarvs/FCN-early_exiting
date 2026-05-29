@@ -1,0 +1,16 @@
+
+# Ambient
+.venv/*
+venv/*
+
+# Data samples
+data/
+*.png
+*.jpeg
+*.jpg
+*.tar
+*.tgz
+*.mat
+
+# Checkpoints 
+*.pth
