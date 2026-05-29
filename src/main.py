@@ -3,17 +3,16 @@ File adapted from https://github.com/SJTUzhanglj/FCN
 """
 
 import torch
-from torch.autograd import Variable
 from torch.utils.data import DataLoader
 import torchvision
 
-from dataset import SBDClassSeg, MyTestData
-from transform import Colorize
-from criterion import CrossEntropyLoss2d
-from model import FCN8s
-from myfunc import imsave
+from data.data import SBDClassSeg, MyTestData
+from utils.transform import Colorize
+from utils.criterion import CrossEntropyLoss2d
+from models.FCN_8 import FCN8s
+from utils.imsave import imsave
 
-import visdom
+#import visdom
 import numpy as np
 import argparse
 import os
@@ -26,11 +25,11 @@ parser.add_argument('--out', type=str, default='./out', help='path to output dat
 opt = parser.parse_args()
 print(opt)
 
-vis = visdom.Visdom()
-win0 = vis.image(torch.zeros(3, 100, 100))
-win1 = vis.image(torch.zeros(3, 100, 100))
-win2 = vis.image(torch.zeros(3, 100, 100))
-win3 = vis.image(torch.zeros(3, 100, 100))
+#vis = visdom.Visdom()
+#win0 = vis.image(torch.zeros(3, 100, 100))
+#win1 = vis.image(torch.zeros(3, 100, 100))
+#win2 = vis.image(torch.zeros(3, 100, 100))
+#win3 = vis.image(torch.zeros(3, 100, 100))
 color_transform = Colorize()
 """parameters"""
 iterNum = 30
@@ -70,34 +69,34 @@ if opt.phase == 'train':
     for it in range(iterNum):
         epoch_loss = []
         for ib, data in enumerate(loader):
-            inputs = Variable(data[0]).cuda()
-            targets = Variable(data[1]).cuda()
+            inputs = data[0].cuda()
+            targets = data[1].cuda()
             model.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
-            epoch_loss.append(loss.data[0])
+            epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()
             if ib % 2 == 0:
-                image = inputs[0].data.cpu()
+                image = inputs[0].detach().cpu()
                 image[0] = image[0] + 122.67891434
                 image[1] = image[1] + 116.66876762
                 image[2] = image[2] + 104.00698793
                 title = 'input (epoch: %d, step: %d)' % (it, ib)
-                vis.image(image, win=win1, env='fcn', opts=dict(title=title))
+                #vis.image(image, win=win1, env='fcn', opts=dict(title=title))
                 title = 'output (epoch: %d, step: %d)' % (it, ib)
-                vis.image(color_transform(outputs[0].cpu().max(0)[1].data),
-                          win=win2, env='fcn', opts=dict(title=title))
+                #vis.image(color_transform(outputs[0].detach().cpu().max(0)[1]),
+                #          win=win2, env='fcn', opts=dict(title=title))
                 title = 'target (epoch: %d, step: %d)' % (it, ib)
-                vis.image(color_transform(targets.cpu().data),
-                          win=win3, env='fcn', opts=dict(title=title))
+                #vis.image(color_transform(targets.detach().cpu()),
+                #          win=win3, env='fcn', opts=dict(title=title))
                 average = sum(epoch_loss) / len(epoch_loss)
-                print('loss: %.4f (epoch: %d, step: %d)' % (loss.data[0], it, ib))
+                print('loss: %.4f (epoch: %d, step: %d)' % (loss.item(), it, ib))
                 epoch_loss.append(average)
-                x = np.arange(1, len(epoch_loss) + 1, 1)
+                #x = np.arange(1, len(epoch_loss) + 1, 1)
                 title = 'loss (epoch: %d, step: %d)' % (it, ib)
-                vis.line(np.array(epoch_loss), x, env='fcn', win=win0,
-                         opts=dict(title=title))
+                #vis.line(np.array(epoch_loss), x, env='fcn', win=win0,
+                #         opts=dict(title=title))
         filename = ('%s/FCN-epoch-%d-step-%d.pth' \
                     % (checkRoot, it, ib))
         torch.save(model.state_dict(), filename)
@@ -105,7 +104,7 @@ if opt.phase == 'train':
 else:
     for ib, data in enumerate(loader):
         print('testing batch %d' % ib)
-        inputs = Variable(data[0]).cuda()
+        inputs = data[0].cuda()
         outputs = model(inputs)
-        hhh = color_transform(outputs[0].cpu().max(0)[1].data)
+        hhh = color_transform(outputs[0].detach().cpu().max(0)[1])
         imsave(os.path.join(outputRoot, data[1][0] + '.png'), hhh)
