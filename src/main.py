@@ -25,11 +25,7 @@ parser.add_argument('--out', type=str, default='./out', help='path to output dat
 opt = parser.parse_args()
 print(opt)
 
-#vis = visdom.Visdom()
-#win0 = vis.image(torch.zeros(3, 100, 100))
-#win1 = vis.image(torch.zeros(3, 100, 100))
-#win2 = vis.image(torch.zeros(3, 100, 100))
-#win3 = vis.image(torch.zeros(3, 100, 100))
+
 color_transform = Colorize()
 """parameters"""
 iterNum = 30
@@ -42,8 +38,11 @@ if not os.path.exists(opt.out):
     os.mkdir(opt.out)
 if opt.phase == 'train':
     checkRoot = opt.out
-    loader = torch.utils.data.DataLoader(
+    train_loader = torch.utils.data.DataLoader(
         SBDClassSeg(dataRoot, split='train', transform=True),
+        batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = torch.utils.data.DataLoader(
+        SBDClassSeg(dataRoot, split='seg11valid', transform=True),
         batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
 else:
     outputRoot = opt.out
@@ -66,41 +65,74 @@ model = model.cuda()
 
 if opt.phase == 'train':
     """train"""
+    best_loss = float('inf')
+    best_epoch = 0
+
+    # iterate epochs
     for it in range(iterNum):
-        epoch_loss = []
-        for ib, data in enumerate(loader):
+
+        train_epoch_loss = []
+        val_epoch_loss = []
+        
+        # iterate batches (train)
+        model.train()
+        for ib, data in enumerate(train_loader):
             inputs = data[0].cuda()
             targets = data[1].cuda()
             model.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
-            epoch_loss.append(loss.item())
+            train_epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()
             if ib % 2 == 0:
                 image = inputs[0].detach().cpu()
+                # desfaz normalização
                 image[0] = image[0] + 122.67891434
                 image[1] = image[1] + 116.66876762
                 image[2] = image[2] + 104.00698793
-                title = 'input (epoch: %d, step: %d)' % (it, ib)
-                #vis.image(image, win=win1, env='fcn', opts=dict(title=title))
-                title = 'output (epoch: %d, step: %d)' % (it, ib)
-                #vis.image(color_transform(outputs[0].detach().cpu().max(0)[1]),
-                #          win=win2, env='fcn', opts=dict(title=title))
-                title = 'target (epoch: %d, step: %d)' % (it, ib)
-                #vis.image(color_transform(targets.detach().cpu()),
-                #          win=win3, env='fcn', opts=dict(title=title))
-                average = sum(epoch_loss) / len(epoch_loss)
-                print('loss: %.4f (epoch: %d, step: %d)' % (loss.item(), it, ib))
-                epoch_loss.append(average)
-                #x = np.arange(1, len(epoch_loss) + 1, 1)
-                title = 'loss (epoch: %d, step: %d)' % (it, ib)
-                #vis.line(np.array(epoch_loss), x, env='fcn', win=win0,
-                #         opts=dict(title=title))
-        filename = ('%s/FCN-epoch-%d-step-%d.pth' \
-                    % (checkRoot, it, ib))
+                title = 'input (epoch: %d)' % (it)
+                title = 'output (epoch: %d)' % (it)
+                title = 'target (epoch: %d)' % (it)
+                average = sum(train_epoch_loss) / len(train_epoch_loss)
+                print('loss: %.4f (epoch: %d, train)' % (loss.item(), it))
+                train_epoch_loss.append(average)
+                title = 'loss (epoch: %d)' % (it)
+
+        # iterate batches (validation)
+        model.eval()
+        with torch.no_grad():
+            for ib, data in enumerate(val_loader):
+                inputs = data[0].cuda()
+                targets = data[1].cuda()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                val_epoch_loss.append(loss.item())
+                if ib % 2 == 0:
+                    image = inputs[0].detach().cpu()
+                    image[0] = image[0] + 122.67891434
+                    image[1] = image[1] + 116.66876762
+                    image[2] = image[2] + 104.00698793
+                    title = 'input (epoch: %d)' % (it)
+                    title = 'output (epoch: %d)' % (it)
+                    title = 'target (epoch: %d)' % (it)
+                    average = sum(val_epoch_loss) / len(val_epoch_loss)
+                    print('loss: %.4f (epoch: %d, val)' % (loss.item(), it))
+                    val_epoch_loss.append(average)
+                    title = 'loss (epoch: %d)' % (it)
+
+        if average < best_loss:
+            best_loss = average
+            best_epoch = it
+
+
+        filename = ('%s/FCN-epoch-%d.pth' \
+                    % (checkRoot, it))
         torch.save(model.state_dict(), filename)
-        print('save: (epoch: %d, step: %d)' % (it, ib))
+        print('save: (epoch: %d)' % (it))
+        
+        with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
+            f.write('Best epoch: %d with loss: %.4f' % (best_epoch, best_loss))
 else:
     for ib, data in enumerate(loader):
         print('testing batch %d' % ib)
