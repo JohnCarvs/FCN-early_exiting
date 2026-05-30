@@ -68,6 +68,9 @@ if opt.phase == 'train':
     best_loss = float('inf')
     best_epoch = 0
 
+    with open(os.path.join(checkRoot, 'losses.csv'), 'w') as f:
+        f.write('epoch,train_loss,val_loss\n')
+
     # iterate epochs
     for it in range(iterNum):
 
@@ -94,10 +97,12 @@ if opt.phase == 'train':
                 title = 'input (epoch: %d)' % (it)
                 title = 'output (epoch: %d)' % (it)
                 title = 'target (epoch: %d)' % (it)
-                average = sum(train_epoch_loss) / len(train_epoch_loss)
+                average_train = sum(train_epoch_loss) / len(train_epoch_loss)
                 print('loss: %.4f (epoch: %d, train)' % (loss.item(), it))
-                train_epoch_loss.append(average)
+                train_epoch_loss.append(average_train)
                 title = 'loss (epoch: %d)' % (it)
+
+        
 
         # iterate batches (validation)
         model.eval()
@@ -116,13 +121,13 @@ if opt.phase == 'train':
                     title = 'input (epoch: %d)' % (it)
                     title = 'output (epoch: %d)' % (it)
                     title = 'target (epoch: %d)' % (it)
-                    average = sum(val_epoch_loss) / len(val_epoch_loss)
+                    average_val = sum(val_epoch_loss) / len(val_epoch_loss)
                     print('loss: %.4f (epoch: %d, val)' % (loss.item(), it))
-                    val_epoch_loss.append(average)
+                    val_epoch_loss.append(average_val)
                     title = 'loss (epoch: %d)' % (it)
 
-        if average < best_loss:
-            best_loss = average
+        if average_val < best_loss:
+            best_loss = average_val
             best_epoch = it
 
 
@@ -130,9 +135,13 @@ if opt.phase == 'train':
                     % (checkRoot, it))
         torch.save(model.state_dict(), filename)
         print('save: (epoch: %d)' % (it))
-        
+
         with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
             f.write('Best epoch: %d with loss: %.4f' % (best_epoch, best_loss))
+
+        # write losses to csv
+        with open(os.path.join(checkRoot, 'losses.csv'), 'a') as f:
+            f.write('%d,%.4f,%.4f\n' % (it, average_train, average_val))
 else:
     for ib, data in enumerate(loader):
         print('testing batch %d' % ib)
