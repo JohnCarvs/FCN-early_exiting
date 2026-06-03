@@ -82,11 +82,8 @@ class FCN16s(nn.Module):
             # score_fr
             nn.Conv2d(4096, n_class, 1),
         )
-        self.score_feat3 = nn.Conv2d(256, n_class, 1)
         self.score_feat4 = nn.Conv2d(512, n_class, 1)
-        self.upscore = nn.ConvTranspose2d(n_class, n_class, 16, stride=8,
-                                              bias=False)
-        self.upscore_4 = nn.ConvTranspose2d(n_class, n_class, 4, stride=2,
+        self.upscore = nn.ConvTranspose2d(n_class, n_class, 32, stride=16,       # final upscale
                                               bias=False)
         self.upscore_5 = nn.ConvTranspose2d(n_class, n_class, 4, stride=2,
                                               bias=False)
@@ -97,16 +94,12 @@ class FCN16s(nn.Module):
         feat5 = self.features_5(feat4)  #1/32
 
         score5 = self.classifier(feat5)
-        upscore5 = self.upscore_5(score5)
+        upscore5 = self.upscore_5(score5)   # 1/16
         score4 = self.score_feat4(feat4)
         score4 = score4[:, :, 5:5+upscore5.size()[2], 5:5+upscore5.size()[3]].contiguous()
         score4 += upscore5
 
-        score3 = self.score_feat3(feat3)
-        upscore4 = self.upscore_4(score4)
-        score3 = score3[:, :, 9:9+upscore4.size()[2], 9:9+upscore4.size()[3]].contiguous()
-        score3 += upscore4
-        h = self.upscore(score3)
+        h = self.upscore(score4)        # 1/1
         h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
 
         return h
@@ -140,12 +133,12 @@ class FCN16s(nn.Module):
             self.upscore.weight.data = \
                 weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
             
-            c1, c2, h, w = self.upscore_4.weight.data.size()
-            assert c1 == c2 == n_class
-            assert h == w
-            weight = get_upsample_filter(h)
-            self.upscore_4.weight.data = \
-                weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
+            #c1, c2, h, w = self.upscore_4.weight.data.size()
+            #assert c1 == c2 == n_class
+            #assert h == w
+            #weight = get_upsample_filter(h)
+            #self.upscore_4.weight.data = \
+            #    weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
                 
             c1, c2, h, w = self.upscore_5.weight.data.size()
             assert c1 == c2 == n_class
