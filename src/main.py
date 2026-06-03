@@ -5,6 +5,7 @@ File adapted from https://github.com/SJTUzhanglj/FCN
 import torch
 from torch.utils.data import DataLoader
 import torchvision
+import re
 
 from data.data import SBDClassSeg, MyTestData
 from utils.transform import Colorize
@@ -22,20 +23,20 @@ parser.add_argument('--phase', type=str, default='train', help='train or test')
 parser.add_argument('--param', type=str, default=None, help='path to pre-trained parameters')
 parser.add_argument('--data', type=str, default='./train', help='path to input data')
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
+parser.add_argument('--epochs', type=int, default=30, help='total number of training epochs')
 opt = parser.parse_args()
 print(opt)
 
 
 color_transform = Colorize()
 """parameters"""
-iterNum = 30
+iterNum = opt.epochs
 
 """data loader"""
 # dataRoot = '/media/xyz/Files/data/datasets'
 # checkRoot = '/media/xyz/Files/fcn8s-deconv'
 dataRoot = opt.data
-if not os.path.exists(opt.out):
-    os.mkdir(opt.out)
+os.makedirs(opt.out, exist_ok=True)
 if opt.phase == 'train':
     checkRoot = opt.out
     train_loader = torch.utils.data.DataLoader(
@@ -56,7 +57,11 @@ if opt.param is None:
     vgg16 = torchvision.models.vgg16(pretrained=True)
     model.copy_params_from_vgg16(vgg16, copy_fc8=False, init_upscore=True)
 else:
-    model.load_state_dict(torch.load(opt.param))
+    checkpoint = torch.load(opt.param, map_location='cpu')
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        model.load_state_dict(checkpoint)
 
 criterion = CrossEntropyLoss2d()
 optimizer = torch.optim.Adam(model.parameters(), 0.0001, betas=(0.5, 0.999))
@@ -67,12 +72,28 @@ if opt.phase == 'train':
     """train"""
     best_loss = float('inf')
     best_epoch = 0
+    start_epoch = 0
 
-    with open(os.path.join(checkRoot, 'losses.csv'), 'w') as f:
-        f.write('epoch,train_loss,val_loss\n')
+    if opt.param is not None and isinstance(checkpoint, dict):
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if 'best_loss' in checkpoint:
+            best_loss = checkpoint['best_loss']
+        if 'best_epoch' in checkpoint:
+            best_epoch = checkpoint['best_epoch']
+        if 'epoch' in checkpoint:
+            start_epoch = checkpoint['epoch'] + 1
+        else:
+            match = re.search(r'epoch-(\d+)\.pth$', os.path.basename(opt.param))
+            if match:
+                start_epoch = int(match.group(1)) + 1
+
+    if start_epoch == 0 or not os.path.exists(os.path.join(checkRoot, 'losses.csv')):
+        with open(os.path.join(checkRoot, 'losses.csv'), 'w') as f:
+            f.write('epoch,train_loss,val_loss\n')
 
     # iterate epochs
-    for it in range(iterNum):
+    for it in range(start_epoch, iterNum):
 
         train_epoch_loss = []
         val_epoch_loss = []
@@ -133,7 +154,13 @@ if opt.phase == 'train':
 
         filename = ('%s/FCN-epoch-%d.pth' \
                     % (checkRoot, it))
-        torch.save(model.state_dict(), filename)
+        torch.save({
+            'epoch': it,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_loss': best_loss,
+            'best_epoch': best_epoch,
+        }, filename)
         print('save: (epoch: %d)' % (it))
 
         with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:

@@ -14,3 +14,6 @@ data/
 
 # Checkpoints 
 *.pth
+
+# Cache
+*.pyc
