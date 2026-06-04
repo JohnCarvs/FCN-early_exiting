@@ -23,7 +23,6 @@ class ConfusionMatrix:
             (targets, preds),
             1
         )
-
         
 
     def mean_pixel_acc(self):
@@ -36,3 +35,16 @@ class ConfusionMatrix:
         )
         return(np.mean(acc_per_class))
 
+    def miou(self):
+        # return TP/TP+FP+FN
+        true_positives = np.diag(self.matrix)
+
+        false_positives = np.sum(self.matrix, axis=0) - true_positives
+        false_negatives = np.sum(self.matrix, axis=1) - true_positives
+
+        iou_per_class = true_positives / np.maximum(
+            true_positives + false_positives + false_negatives,
+            1
+        )
+
+        return(np.mean(iou_per_class))
