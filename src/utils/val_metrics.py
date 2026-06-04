@@ -42,9 +42,10 @@ class ConfusionMatrix:
         false_positives = np.sum(self.matrix, axis=0) - true_positives
         false_negatives = np.sum(self.matrix, axis=1) - true_positives
 
-        iou_per_class = true_positives / np.maximum(
-            true_positives + false_positives + false_negatives,
-            1
-        )
+        denom = true_positives + false_positives + false_negatives
+
+        valid = denom > 0
+        
+        iou_per_class = true_positives[valid] / denom[valid]
 
         return(np.mean(iou_per_class))
