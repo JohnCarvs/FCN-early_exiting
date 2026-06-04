@@ -26,7 +26,7 @@ parser.add_argument('--param', type=str, default=None, help='path to pre-trained
 parser.add_argument('--data', type=str, default='./train', help='path to input data')
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
 parser.add_argument('--epochs', type=int, default=30, help='total number of training epochs')
-parser.add_argument('--model', type=str, default="FCN32", help='name of the model to run')
+parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
 opt = parser.parse_args()
 print(opt)
 
