@@ -23,3 +23,16 @@ class ConfusionMatrix:
             (targets, preds),
             1
         )
+
+        
+
+    def mean_pixel_acc(self):
+        true_positives = np.diag(self.matrix)
+        total_per_class = np.sum(self.matrix, axis=1)
+        
+        acc_per_class = (
+            true_positives /
+            np.maximum(total_per_class, 1)  # avoid division by 0
+        )
+        return(np.mean(acc_per_class))
+

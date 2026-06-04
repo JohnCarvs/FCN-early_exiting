@@ -10,6 +10,8 @@ import re
 from data.data import SBDClassSeg, MyTestData
 from utils.transform import Colorize
 from utils.criterion import CrossEntropyLoss2d
+from utils.val_metrics import ConfusionMatrix
+
 from models.FCN_8 import FCN8s
 from models.FCN_16 import FCN16s
 from models.FCN_32 import FCN32s
@@ -19,13 +21,14 @@ from utils.imsave import imsave
 import numpy as np
 import argparse
 import os
+import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--phase', type=str, default='train', help='train or test')
 parser.add_argument('--param', type=str, default=None, help='path to pre-trained parameters')
 parser.add_argument('--data', type=str, default='./train', help='path to input data')
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
-parser.add_argument('--epochs', type=int, default=30, help='total number of training epochs')
+parser.add_argument('--epochs', type=int, default=90, help='total number of training epochs')
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
 opt = parser.parse_args()
 print(opt)
@@ -53,16 +56,20 @@ else:
     loader = torch.utils.data.DataLoader(
         MyTestData(dataRoot, transform=True),
         batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
+n_class = len(SBDClassSeg.class_names)
+print(f"Predicting {n_class} classes")
 
 """nets"""
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s()
+        model = FCN8s(n_class)
     case "FCN16":
-        model = FCN16s()
+        model = FCN16s(n_class)
     case "FCN32":
-        model = FCN32s()
+        model = FCN32s(n_class)
+
+"""load checkpoint"""
 if opt.param is None:
     vgg16 = torchvision.models.vgg16(pretrained=True)
     model.copy_params_from_vgg16(vgg16, copy_fc8=False, init_upscore=True)
@@ -75,6 +82,7 @@ else:
 
 criterion = CrossEntropyLoss2d()
 optimizer = torch.optim.Adam(model.parameters(), 0.0001, betas=(0.5, 0.999))
+conf_matrix = ConfusionMatrix(n_class)
 
 model = model.cuda()
 
@@ -108,6 +116,7 @@ if opt.phase == 'train':
         train_epoch_loss = []
         val_epoch_loss = []
         
+        """
         # iterate batches (train)
         model.train()
         for ib, data in enumerate(train_loader):
@@ -132,6 +141,7 @@ if opt.phase == 'train':
                 print('loss: %.4f (epoch: %d, train)' % (loss.item(), it))
                 train_epoch_loss.append(average_train)
                 title = 'loss (epoch: %d)' % (it)
+        """
 
         
 
@@ -143,6 +153,11 @@ if opt.phase == 'train':
                 targets = data[1].cuda()
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
+                preds = outputs.argmax(dim=1)
+                conf_matrix.update(preds, targets)
+
+                print(conf_matrix.mean_pixel_acc())
+
                 val_epoch_loss.append(loss.item())
                 if ib % 2 == 0:
                     image = inputs[0].detach().cpu()
@@ -156,6 +171,15 @@ if opt.phase == 'train':
                     print('loss: %.4f (epoch: %d, val)' % (loss.item(), it))
                     val_epoch_loss.append(average_val)
                     title = 'loss (epoch: %d)' % (it)
+
+        #print(conf_matrix.matrix)
+        #print("shape: ", conf_matrix.matrix.shape)
+        #print("total pixels: ", conf_matrix.matrix.sum())
+        #print("total diag: ", np.diag(conf_matrix.matrix).sum())
+        #print("GT distribuition: ", conf_matrix.matrix.sum(axis=1))
+        #print("pred distribuition: ", conf_matrix.matrix.sum(axis=0))
+        #sys.exit()
+
 
         if average_val < best_loss:
             best_loss = average_val
