@@ -11,6 +11,8 @@ from data.data import SBDClassSeg, MyTestData
 from utils.transform import Colorize
 from utils.criterion import CrossEntropyLoss2d
 from models.FCN_8 import FCN8s
+from models.FCN_16 import FCN16s
+from models.FCN_32 import FCN32s
 from utils.imsave import imsave
 
 #import visdom
@@ -24,6 +26,7 @@ parser.add_argument('--param', type=str, default=None, help='path to pre-trained
 parser.add_argument('--data', type=str, default='./train', help='path to input data')
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
 parser.add_argument('--epochs', type=int, default=30, help='total number of training epochs')
+parser.add_argument('--model', type=str, default="FCN32", help='name of the model to run')
 opt = parser.parse_args()
 print(opt)
 
@@ -52,7 +55,14 @@ else:
         batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
 
 """nets"""
-model = FCN8s()
+model = opt.model
+match model:
+    case "FCN8":
+        model = FCN8s()
+    case "FCN16":
+        model = FCN16s()
+    case "FCN32":
+        model = FCN32s()
 if opt.param is None:
     vgg16 = torchvision.models.vgg16(pretrained=True)
     model.copy_params_from_vgg16(vgg16, copy_fc8=False, init_upscore=True)
