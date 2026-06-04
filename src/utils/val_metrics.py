@@ -35,7 +35,7 @@ class ConfusionMatrix:
         )
         return(np.mean(acc_per_class))
 
-    def miou(self):
+    def iou_per_class(self):
         # return TP/TP+FP+FN
         true_positives = np.diag(self.matrix)
 
@@ -46,6 +46,13 @@ class ConfusionMatrix:
 
         valid = denom > 0
         
+        iou_per_class = np.array(self.n_classes, dtype=float64)
+        
         iou_per_class = true_positives[valid] / denom[valid]
 
-        return(np.mean(iou_per_class))
+        return(iou_per_class)
+    
+    def miou(self):
+        # return TP/TP+FP+FN
+        
+        return(np.mean(self.iou_per_class()))
