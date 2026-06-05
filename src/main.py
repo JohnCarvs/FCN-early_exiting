@@ -186,12 +186,12 @@ if opt.phase == 'train':
         
 
         mean_pixel_acc = conf_matrix.mean_pixel_acc()
-        iou_per_class = conf_matrix.iou_per_class()
+        iou_per_class = conf_matrix.iou_per_class()         # how can we save this to use later? 
         miou = conf_matrix.miou()
 
 
 
-        if average_val_loss < best_loss:
+        if average_val_loss < best_loss:    # instead of using average_val_loss, should we use mIoU??
             best_loss = average_val_loss
             best_epoch = it
 

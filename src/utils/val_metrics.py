@@ -14,7 +14,7 @@ class ConfusionMatrix:
         
 
     def update(self, preds, targets):
-        preds = preds.detach().cpu().numpy().astype(np.int64)
+        preds = preds.detach().cpu().numpy().astype(np.int64)       # should we flatten this?
         targets = targets.detach().cpu().numpy().astype(np.int64)
 
         # for each coordinate in (targets, preds), sum '1'
