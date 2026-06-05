@@ -46,9 +46,9 @@ class ConfusionMatrix:
 
         valid = denom > 0
         
-        iou_per_class = np.array(self.n_classes, dtype=float64)
+        iou_per_class = np.zeros(self.n_classes, dtype=float)
         
-        iou_per_class = true_positives[valid] / denom[valid]
+        iou_per_class[valid] = true_positives[valid] / denom[valid]
 
         return(iou_per_class)
     
