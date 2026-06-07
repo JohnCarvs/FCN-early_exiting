@@ -24,6 +24,8 @@ import argparse
 import os
 import sys
 
+AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}    # weights for auxiliary losses
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--phase', type=str, default='train', help='train or test')
 parser.add_argument('--param', type=str, default=None, help='path to pre-trained parameters')
@@ -31,7 +33,7 @@ parser.add_argument('--data', type=str, default='./train', help='path to input d
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
 parser.add_argument('--epochs', type=int, default=90, help='total number of training epochs')
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
-parser.add_argument('--aux_weight', type=float, default=0.4, help='weight for auxiliary loss (if applicable)')
+parser.add_argument('--aux', action='store_true', default=False, help='use auxiliary loss')
 opt = parser.parse_args()
 print(opt)
 
@@ -68,11 +70,11 @@ print(f"Predicting {n_class} classes")
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s(n_class, aux=(opt.aux_weight > 0))
+        model = FCN8s(n_class, aux=opt.aux)
     case "FCN16":
-        model = FCN16s(n_class, aux=(opt.aux_weight > 0))
+        model = FCN16s(n_class, aux=opt.aux)
     case "FCN32":
-        model = FCN32s(n_class, aux=(opt.aux_weight > 0))
+        model = FCN32s(n_class, aux=opt.aux)
 
 """load checkpoint"""
 if opt.param is None:
@@ -133,12 +135,14 @@ if opt.phase == 'train':
             targets = data[1].to(device)
             model.zero_grad()
             out = model(inputs)
-            outputs, aux = out if isinstance(out, tuple) else (out, None)
+            outputs, aux_dict = (out[0], out[1]) if isinstance(out, tuple) else (out, {})
             loss = criterion(outputs, targets)
-            if aux is not None:
-                gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux.shape[-2:], 
+            for name, w in AUX_WEIGHTS.items():
+                if name not in aux_dict:
+                    continue
+                gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux_dict[name].shape[-2:], 
                                        mode='nearest').squeeze(1).long()
-                loss = loss + opt.aux_weight * criterion(aux, gt_low)
+                loss = loss + w * criterion(aux_dict[name], gt_low)
             train_epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()

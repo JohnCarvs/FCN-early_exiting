@@ -103,7 +103,7 @@ class FCN16s(nn.Module):
         h = self.upscore(score4)        # 1/1
         h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
 
-        return (h, score5) if (self.aux and self.training) else h
+        return (h, {'s32':score5}) if (self.aux and self.training) else h
 
     def copy_params_from_vgg16(self, vgg16, copy_fc8=True, init_upscore=True):
         for l1, l2 in zip(vgg16.features, [self.features_123,self.features_4,self.features_5]):
