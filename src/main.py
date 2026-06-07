@@ -33,6 +33,9 @@ parser.add_argument('--model', type=str, default="FCN8", help='name of the model
 opt = parser.parse_args()
 print(opt)
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
 
 color_transform = Colorize()
 """parameters"""
@@ -71,7 +74,11 @@ match model:
 
 """load checkpoint"""
 if opt.param is None:
-    vgg16 = torchvision.models.vgg16(pretrained=True)
+    try:
+        from torchvision.models import VGG16_Weights
+        vgg16 = torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
+    except ImportError:
+        vgg16 = torchvision.models.vgg16(pretrained=True)
     model.copy_params_from_vgg16(vgg16, copy_fc8=False, init_upscore=True)
 else:
     checkpoint = torch.load(opt.param, map_location='cpu')
@@ -84,7 +91,7 @@ criterion = CrossEntropyLoss2d()
 optimizer = torch.optim.Adam(model.parameters(), 0.0001, betas=(0.5, 0.999))
 conf_matrix = ConfusionMatrix(n_class)
 
-model = model.cuda()
+model = model.to(device)
 
 if opt.phase == 'train':
     """train"""
@@ -120,8 +127,8 @@ if opt.phase == 'train':
         # iterate batches (train)
         model.train()
         for ib, data in enumerate(train_loader):
-            inputs = data[0].cuda()
-            targets = data[1].cuda()
+            inputs = data[0].to(device)
+            targets = data[1].to(device)
             model.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
@@ -148,8 +155,8 @@ if opt.phase == 'train':
         conf_matrix.reset()
         with torch.no_grad():
             for ib, data in enumerate(val_loader):
-                inputs = data[0].cuda()
-                targets = data[1].cuda()
+                inputs = data[0].to(device)
+                targets = data[1].to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 preds = outputs.argmax(dim=1)
@@ -216,7 +223,7 @@ if opt.phase == 'train':
 else:
     for ib, data in enumerate(loader):
         print('testing batch %d' % ib)
-        inputs = data[0].cuda()
+        inputs = data[0].to(device)
         outputs = model(inputs)
         hhh = color_transform(outputs[0].detach().cpu().max(0)[1])
         imsave(os.path.join(outputRoot, data[1][0] + '.png'), hhh)
