@@ -22,8 +22,9 @@ def get_upsample_filter(size):
 
 class FCN16s(nn.Module):
 
-    def __init__(self, n_class=21):
+    def __init__(self, n_class=21, aux=False):
         super(FCN16s, self).__init__()
+        self.aux = aux
         self.features_123 = nn.Sequential(
             # conv1
             nn.Conv2d(3, 64, 3, padding=100),
@@ -102,7 +103,7 @@ class FCN16s(nn.Module):
         h = self.upscore(score4)        # 1/1
         h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
 
-        return h
+        return (h, score5) if (self.aux and self.training) else h
 
     def copy_params_from_vgg16(self, vgg16, copy_fc8=True, init_upscore=True):
         for l1, l2 in zip(vgg16.features, [self.features_123,self.features_4,self.features_5]):

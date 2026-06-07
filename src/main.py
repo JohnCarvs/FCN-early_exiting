@@ -3,6 +3,7 @@ File adapted from https://github.com/SJTUzhanglj/FCN
 """
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torchvision
 import re
@@ -30,6 +31,7 @@ parser.add_argument('--data', type=str, default='./train', help='path to input d
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
 parser.add_argument('--epochs', type=int, default=90, help='total number of training epochs')
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
+parser.add_argument('--aux_weight', type=float, default=0.4, help='weight for auxiliary loss (if applicable)')
 opt = parser.parse_args()
 print(opt)
 
@@ -66,11 +68,11 @@ print(f"Predicting {n_class} classes")
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s(n_class)
+        model = FCN8s(n_class, aux=(opt.aux_weight > 0))
     case "FCN16":
-        model = FCN16s(n_class)
+        model = FCN16s(n_class, aux=(opt.aux_weight > 0))
     case "FCN32":
-        model = FCN32s(n_class)
+        model = FCN32s(n_class, aux=(opt.aux_weight > 0))
 
 """load checkpoint"""
 if opt.param is None:
@@ -130,8 +132,13 @@ if opt.phase == 'train':
             inputs = data[0].to(device)
             targets = data[1].to(device)
             model.zero_grad()
-            outputs = model(inputs)
+            out = model(inputs)
+            outputs, aux = out if isinstance(out, tuple) else (out, None)
             loss = criterion(outputs, targets)
+            if aux is not None:
+                gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux.shape[-2:], 
+                                       mode='nearest').squeeze(1).long()
+                loss = loss + opt.aux_weight * criterion(aux, gt_low)
             train_epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()
@@ -221,6 +228,7 @@ if opt.phase == 'train':
         with open(os.path.join(checkRoot, 'metrics.csv'), 'a') as f:
             f.write('%d,%.4f,%.4f,%.4f,%.4f\n' % (it, average_train_loss, average_val_loss, mean_pixel_acc, miou))
 else:
+    model.eval()
     for ib, data in enumerate(loader):
         print('testing batch %d' % ib)
         inputs = data[0].to(device)
