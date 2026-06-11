@@ -12,6 +12,7 @@ from data.data import SBDClassSeg, MyTestData
 from utils.transform import Colorize
 from utils.criterion import CrossEntropyLoss2d
 from utils.val_metrics import ConfusionMatrix
+from utils.class_weights import compute_class_weights
 
 from models.FCN_8 import FCN8s
 from models.FCN_16 import FCN16s
@@ -34,6 +35,7 @@ parser.add_argument('--out', type=str, default='./out', help='path to output dat
 parser.add_argument('--epochs', type=int, default=90, help='total number of training epochs')
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
 parser.add_argument('--aux', action='store_true', default=False, help='use auxiliary loss')
+parser.add_argument('--class_weights', action='store_true', default=False, help='compute and cache class weights')
 opt = parser.parse_args()
 print(opt)
 
@@ -52,8 +54,9 @@ dataRoot = opt.data
 os.makedirs(opt.out, exist_ok=True)
 if opt.phase == 'train':
     checkRoot = opt.out
+    train_dataset = SBDClassSeg(dataRoot, split='train', transform=True)
     train_loader = torch.utils.data.DataLoader(
-        SBDClassSeg(dataRoot, split='train', transform=True),
+        train_dataset,
         batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(
         SBDClassSeg(dataRoot, split='seg11valid', transform=True),
@@ -91,7 +94,12 @@ else:
     else:
         model.load_state_dict(checkpoint)
 
-criterion = CrossEntropyLoss2d()
+class_weights = None
+if opt.phase == 'train' and opt.class_weights:
+    cache_path = os.path.join(dataRoot, 'class_weights.npy')
+    class_weights = compute_class_weights(train_dataset, n_class, cache_path).to(device)
+    print('class weights:', np.round(class_weights.cpu().numpy(), 3))
+criterion = CrossEntropyLoss2d(weight=class_weights)
 optimizer = torch.optim.Adam(model.parameters(), 0.0001, betas=(0.5, 0.999))
 conf_matrix = ConfusionMatrix(n_class)
 
