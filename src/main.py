@@ -25,7 +25,8 @@ import argparse
 import os
 import sys
 
-AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}    # weights for auxiliary losses
+#AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}    # weights for auxiliary losses
+AUX_WEIGHTS = {'s16': 0.4}    # weights for auxiliary losses
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--phase', type=str, default='train', help='train or test')
@@ -109,15 +110,18 @@ if opt.phase == 'train':
     """train"""
     best_loss = float('inf')
     best_epoch = 0
+    best_miou = -1.0
     start_epoch = 0
 
-    if opt.param is not None and isinstance(checkpoint, dict):
+        if opt.param is not None and isinstance(checkpoint, dict):
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'best_loss' in checkpoint:
             best_loss = checkpoint['best_loss']
         if 'best_epoch' in checkpoint:
             best_epoch = checkpoint['best_epoch']
+            if 'best_miou' in checkpoint:
+                best_miou = checkpoint['best_miou']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
         else:
@@ -217,24 +221,30 @@ if opt.phase == 'train':
 
 
 
-        if average_val_loss < best_loss:    # instead of using average_val_loss, should we use mIoU??
-            best_loss = average_val_loss
+        # save only if mean IoU improved
+        improved = False
+        if miou > best_miou:
+            best_miou = miou
             best_epoch = it
+            improved = True
 
+        if improved:
+            filename = ('%s/FCN-epoch-%d.pth' \
+                        % (checkRoot, it))
+            torch.save({
+                'epoch': it,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_loss': best_loss,
+                'best_epoch': best_epoch,
+                'best_miou': best_miou,
+            }, filename)
+            print('saved checkpoint (epoch: %d) with mIoU: %.4f' % (it, best_miou))
 
-        filename = ('%s/FCN-epoch-%d.pth' \
-                    % (checkRoot, it))
-        torch.save({
-            'epoch': it,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'best_loss': best_loss,
-            'best_epoch': best_epoch,
-        }, filename)
-        print('save: (epoch: %d)' % (it))
-
-        with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
-            f.write('Best epoch: %d with loss: %.4f' % (best_epoch, best_loss))
+            with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
+                f.write('Best epoch: %d with mIoU: %.4f' % (best_epoch, best_miou))
+        else:
+            print('no improvement in mIoU (epoch: %d: mIoU=%.4f), checkpoint not saved' % (it, miou))
 
         # write losses to csv
         with open(os.path.join(checkRoot, 'metrics.csv'), 'a') as f:
