@@ -37,6 +37,8 @@ parser.add_argument('--epochs', type=int, default=90, help='total number of trai
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
 parser.add_argument('--aux', action='store_true', default=False, help='use auxiliary loss')
 parser.add_argument('--class_weights', action='store_true', default=False, help='compute and cache class weights')
+parser.add_argument('--aux_weights', type=str, default=None,
+                    help="auxiliary weights, format 's16:0.4,s32:0.3' (overrides default AUX_WEIGHTS)")
 opt = parser.parse_args()
 print(opt)
 
@@ -47,6 +49,26 @@ print(f"Using device: {device}")
 color_transform = Colorize()
 """parameters"""
 iterNum = opt.epochs
+
+# if provided via CLI, parse and override AUX_WEIGHTS (format: name:weight,name:weight)
+if opt.aux_weights:
+    parsed = {}
+    for token in opt.aux_weights.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        if ':' in token:
+            name, val = token.split(':', 1)
+        elif '=' in token:
+            name, val = token.split('=', 1)
+        else:
+            raise ValueError(f"Invalid --aux_weights token: {token}. Use name:weight")
+        try:
+            parsed[name.strip()] = float(val)
+        except Exception:
+            raise ValueError(f"Invalid weight for {name}: {val}")
+    AUX_WEIGHTS = parsed
+    print('AUX_WEIGHTS set from CLI:', AUX_WEIGHTS)
 
 """data loader"""
 # dataRoot = '/media/xyz/Files/data/datasets'
@@ -112,16 +134,15 @@ if opt.phase == 'train':
     best_epoch = 0
     best_miou = -1.0
     start_epoch = 0
-
-        if opt.param is not None and isinstance(checkpoint, dict):
+    if opt.param is not None and isinstance(checkpoint, dict):
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if 'best_loss' in checkpoint:
             best_loss = checkpoint['best_loss']
         if 'best_epoch' in checkpoint:
             best_epoch = checkpoint['best_epoch']
-            if 'best_miou' in checkpoint:
-                best_miou = checkpoint['best_miou']
+        if 'best_miou' in checkpoint:
+            best_miou = checkpoint['best_miou']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
         else:
