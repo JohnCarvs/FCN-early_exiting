@@ -243,14 +243,16 @@ if opt.phase == 'train':
 
 
 
-        # save only if mean IoU improved
+        # save if mean IoU improved OR periodically every 25 epochs
         improved = False
         if miou > best_miou:
             best_miou = miou
             best_epoch = it
             improved = True
 
-        if improved:
+        periodic_save = (it % 25 == 0)
+
+        if improved or periodic_save:
             filename = ('%s/FCN-epoch-%d.pth' \
                         % (checkRoot, it))
             torch.save({
@@ -261,10 +263,12 @@ if opt.phase == 'train':
                 'best_epoch': best_epoch,
                 'best_miou': best_miou,
             }, filename)
-            print('saved checkpoint (epoch: %d) with mIoU: %.4f' % (it, best_miou))
-
-            with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
-                f.write('Best epoch: %d with mIoU: %.4f' % (best_epoch, best_miou))
+            if improved:
+                print('saved checkpoint (epoch: %d) with new best mIoU: %.4f' % (it, best_miou))
+                with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
+                    f.write('Best epoch: %d with mIoU: %.4f' % (best_epoch, best_miou))
+            else:
+                print('periodic save: checkpoint (epoch: %d) saved (mIoU=%.4f)' % (it, miou))
         else:
             print('no improvement in mIoU (epoch: %d: mIoU=%.4f), checkpoint not saved' % (it, miou))
 
