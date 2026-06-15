@@ -36,6 +36,7 @@ parser.add_argument('--epochs', type=int, default=90, help='total number of trai
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
 parser.add_argument('--aux', action='store_true', default=False, help='use auxiliary loss')
 parser.add_argument('--class_weights', action='store_true', default=False, help='compute and cache class weights')
+parser.add_argument('--no_skip', action='store_true', default=False, help='disable skip connections')
 opt = parser.parse_args()
 print(opt)
 
@@ -73,11 +74,11 @@ print(f"Predicting {n_class} classes")
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s(n_class, aux=opt.aux)
+        model = FCN8s(n_class, aux=opt.aux, no_skip=opt.no_skip)
     case "FCN16":
-        model = FCN16s(n_class, aux=opt.aux)
+        model = FCN16s(n_class, aux=opt.aux, no_skip=opt.no_skip)
     case "FCN32":
-        model = FCN32s(n_class, aux=opt.aux)
+        model = FCN32s(n_class, aux=opt.aux, no_skip=opt.no_skip)
 
 """load checkpoint"""
 if opt.param is None:

@@ -22,9 +22,10 @@ def get_upsample_filter(size):
 
 class FCN8s(nn.Module):
 
-    def __init__(self, n_class=21, aux=False):
+    def __init__(self, n_class=21, aux=False, no_skip=False):
         super(FCN8s, self).__init__()
         self.aux = aux
+        self.no_skip = no_skip
         self.features_123 = nn.Sequential(
             # conv1
             nn.Conv2d(3, 64, 3, padding=100),
@@ -99,14 +100,20 @@ class FCN8s(nn.Module):
 
         score5 = self.classifier(feat5)
         upscore5 = self.upscore_5(score5)
-        score4 = self.score_feat4(feat4)
-        score4 = score4[:, :, 5:5+upscore5.size()[2], 5:5+upscore5.size()[3]].contiguous()
-        score4 += upscore5
+        if self.no_skip:
+            score4 = upscore5
+        else:
+            score4 = self.score_feat4(feat4)
+            score4 = score4[:, :, 5:5+upscore5.size()[2], 5:5+upscore5.size()[3]].contiguous()
+            score4 += upscore5
 
-        score3 = self.score_feat3(feat3)
         upscore4 = self.upscore_4(score4)
-        score3 = score3[:, :, 9:9+upscore4.size()[2], 9:9+upscore4.size()[3]].contiguous()
-        score3 += upscore4
+        if self.no_skip:
+            score3 = upscore4
+        else:
+            score3 = self.score_feat3(feat3)
+            score3 = score3[:, :, 9:9+upscore4.size()[2], 9:9+upscore4.size()[3]].contiguous()
+            score3 += upscore4
         h = self.upscore(score3)
         h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
 

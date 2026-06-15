@@ -22,9 +22,10 @@ def get_upsample_filter(size):
 
 class FCN32s(nn.Module):
 
-    def __init__(self, n_class=21, aux=False):
+    def __init__(self, n_class=21, aux=False, no_skip=False):
         super(FCN32s, self).__init__()
         self.aux = aux
+        self.no_skip = no_skip
         self.features_123 = nn.Sequential(
             # conv1
             nn.Conv2d(3, 64, 3, padding=100),
