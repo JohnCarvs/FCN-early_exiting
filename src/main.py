@@ -25,7 +25,8 @@ import argparse
 import os
 import sys
 
-AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}    # weights for auxiliary losses
+#AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}    # weights for auxiliary losses
+AUX_WEIGHTS = {'s16': 0.4}    # weights for auxiliary losses
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--phase', type=str, default='train', help='train or test')
@@ -36,6 +37,8 @@ parser.add_argument('--epochs', type=int, default=90, help='total number of trai
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
 parser.add_argument('--aux', action='store_true', default=False, help='use auxiliary loss')
 parser.add_argument('--class_weights', action='store_true', default=False, help='compute and cache class weights')
+parser.add_argument('--aux_weights', type=str, default=None,
+                    help="auxiliary weights, format 's16:0.4,s32:0.3' (overrides default AUX_WEIGHTS)")
 parser.add_argument('--no_skip', action='store_true', default=False, help='disable skip connections')
 opt = parser.parse_args()
 print(opt)
@@ -47,6 +50,26 @@ print(f"Using device: {device}")
 color_transform = Colorize()
 """parameters"""
 iterNum = opt.epochs
+
+# if provided via CLI, parse and override AUX_WEIGHTS (format: name:weight,name:weight)
+if opt.aux_weights:
+    parsed = {}
+    for token in opt.aux_weights.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        if ':' in token:
+            name, val = token.split(':', 1)
+        elif '=' in token:
+            name, val = token.split('=', 1)
+        else:
+            raise ValueError(f"Invalid --aux_weights token: {token}. Use name:weight")
+        try:
+            parsed[name.strip()] = float(val)
+        except Exception:
+            raise ValueError(f"Invalid weight for {name}: {val}")
+    AUX_WEIGHTS = parsed
+    print('AUX_WEIGHTS set from CLI:', AUX_WEIGHTS)
 
 """data loader"""
 # dataRoot = '/media/xyz/Files/data/datasets'
@@ -110,8 +133,8 @@ if opt.phase == 'train':
     """train"""
     best_loss = float('inf')
     best_epoch = 0
+    best_miou = -1.0
     start_epoch = 0
-
     if opt.param is not None and isinstance(checkpoint, dict):
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -119,6 +142,8 @@ if opt.phase == 'train':
             best_loss = checkpoint['best_loss']
         if 'best_epoch' in checkpoint:
             best_epoch = checkpoint['best_epoch']
+        if 'best_miou' in checkpoint:
+            best_miou = checkpoint['best_miou']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
         else:
@@ -218,24 +243,30 @@ if opt.phase == 'train':
 
 
 
-        if average_val_loss < best_loss:    # instead of using average_val_loss, should we use mIoU??
-            best_loss = average_val_loss
+        # save only if mean IoU improved
+        improved = False
+        if miou > best_miou:
+            best_miou = miou
             best_epoch = it
+            improved = True
 
+        if improved:
+            filename = ('%s/FCN-epoch-%d.pth' \
+                        % (checkRoot, it))
+            torch.save({
+                'epoch': it,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_loss': best_loss,
+                'best_epoch': best_epoch,
+                'best_miou': best_miou,
+            }, filename)
+            print('saved checkpoint (epoch: %d) with mIoU: %.4f' % (it, best_miou))
 
-        filename = ('%s/FCN-epoch-%d.pth' \
-                    % (checkRoot, it))
-        torch.save({
-            'epoch': it,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'best_loss': best_loss,
-            'best_epoch': best_epoch,
-        }, filename)
-        print('save: (epoch: %d)' % (it))
-
-        with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
-            f.write('Best epoch: %d with loss: %.4f' % (best_epoch, best_loss))
+            with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
+                f.write('Best epoch: %d with mIoU: %.4f' % (best_epoch, best_miou))
+        else:
+            print('no improvement in mIoU (epoch: %d: mIoU=%.4f), checkpoint not saved' % (it, miou))
 
         # write losses to csv
         with open(os.path.join(checkRoot, 'metrics.csv'), 'a') as f:
