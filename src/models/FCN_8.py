@@ -22,10 +22,14 @@ def get_upsample_filter(size):
 
 class FCN8s(nn.Module):
 
-    def __init__(self, n_class=21, aux=False, no_skip=False):
+    def __init__(self, n_class=21, aux=False, no_skip=False, aux_upsample=False):
         super(FCN8s, self).__init__()
         self.aux = aux
         self.no_skip = no_skip
+        self.aux_upsample = aux_upsample
+        if aux_upsample:
+            self.aux_upscore_s32 = nn.ConvTranspose2d(n_class, n_class, 64, stride=32, bias=False)
+            self.aux_upscore_s16 = nn.ConvTranspose2d(n_class, n_class, 32, stride=16, bias=False)
         self.features_123 = nn.Sequential(
             # conv1
             nn.Conv2d(3, 64, 3, padding=100),
@@ -116,8 +120,13 @@ class FCN8s(nn.Module):
             score3 += upscore4
         h = self.upscore(score3)
         h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
+        if not(self.aux and self.training):
+            return h
+        if self.aux_upsample:
+            c = lambda t: t[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
+            return h, {'s32': c(self.aux_upscore_s32(score5)), 's16': c(self.aux_upscore_s16(score4))}
 
-        return (h, {'s32':score5, 's16':score4}) if (self.aux and self.training) else h
+        return h, {'s32':score5, 's16':score4}
 
     def copy_params_from_vgg16(self, vgg16, copy_fc8=True, init_upscore=True):
         for l1, l2 in zip(vgg16.features, [self.features_123,self.features_4,self.features_5]):
@@ -161,3 +170,11 @@ class FCN8s(nn.Module):
             weight = get_upsample_filter(h)
             self.upscore_5.weight.data = \
                 weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)
+        if self.aux_upsample:
+            for deconv in [self.aux_upscore_s32, self.aux_upscore_s16]:
+                c1, c2, h, w = deconv.weight.data.size()
+                assert c1 == c2 == n_class
+                assert h == w
+                weight = get_upsample_filter(h)
+                deconv.weight.data = \
+                    weight.view(1, 1, h, w).repeat(c1, c2, 1, 1)

@@ -40,6 +40,7 @@ parser.add_argument('--class_weights', action='store_true', default=False, help=
 parser.add_argument('--aux_weights', type=str, default=None,
                     help="auxiliary weights, format 's16:0.4,s32:0.3' (overrides default AUX_WEIGHTS)")
 parser.add_argument('--no_skip', action='store_true', default=False, help='disable skip connections')
+parser.add_argument('--aux_upsample', action='store_true', default=False, help='add upsampling layers for auxiliary outputs')
 opt = parser.parse_args()
 print(opt)
 
@@ -97,11 +98,11 @@ print(f"Predicting {n_class} classes")
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s(n_class, aux=opt.aux, no_skip=opt.no_skip)
+        model = FCN8s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
     case "FCN16":
-        model = FCN16s(n_class, aux=opt.aux, no_skip=opt.no_skip)
+        model = FCN16s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
     case "FCN32":
-        model = FCN32s(n_class, aux=opt.aux, no_skip=opt.no_skip)
+        model = FCN32s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
 
 """load checkpoint"""
 if opt.param is None:
