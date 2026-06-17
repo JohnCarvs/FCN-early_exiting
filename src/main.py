@@ -41,6 +41,8 @@ parser.add_argument('--aux_weights', type=str, default=None,
                     help="auxiliary weights, format 's16:0.4,s32:0.3' (overrides default AUX_WEIGHTS)")
 parser.add_argument('--no_skip', action='store_true', default=False, help='disable skip connections')
 parser.add_argument('--aux_upsample', action='store_true', default=False, help='add upsampling layers for auxiliary outputs')
+parser.add_argument('--aux_interp', action='store_true', default=False, help='aux loss em resolucao cheia via F.interpolate (sem params); use SEM --aux_upsample')
+
 opt = parser.parse_args()
 print(opt)
 
@@ -175,9 +177,14 @@ if opt.phase == 'train':
             for name, w in AUX_WEIGHTS.items():
                 if name not in aux_dict:
                     continue
-                gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux_dict[name].shape[-2:], 
+                if opt.aux_interp:
+                    aux_up = F.interpolate(aux_dict[name], size=targets.shape[-2:],
+                                           mode='bilinear', align_corners=False)
+                    loss = loss + w * criterion(aux_up, targets)
+                else:
+                    gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux_dict[name].shape[-2:], 
                                        mode='nearest').squeeze(1).long()
-                loss = loss + w * criterion(aux_dict[name], gt_low)
+                    loss = loss + w * criterion(aux_dict[name], gt_low)
             train_epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()
