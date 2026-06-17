@@ -1,0 +1,79 @@
+GUIA DE EXECUCAO - FCN com Supervisao Profunda
+================================================
+
+Rode sempre de dentro da pasta src/ (os imports sao relativos).
+Tenha os dados montados (ver SETUP.md). Troque <DATA> pela raiz do seu dataset.
+
+
+CONTROLES
+---------
+- Flag --aux        : liga/desliga a supervisao profunda (na linha de comando).
+- AUX_WEIGHTS (dict): em src/main.py. Define QUAIS ramos usar (chaves) e o
+                      peso alpha de cada (valores). Edite no codigo.
+                        Ex.: AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}
+                        's32' = gargalo (stride-32)
+                        's16' = fusao intermediaria (stride-16, so o FCN-8s tem)
+
+
+1) FCNs BASE (sem supervisao profunda)
+--------------------------------------
+Basta omitir --aux. O AUX_WEIGHTS e ignorado.
+
+  FCN-32s:  python main.py --phase train --model FCN32 --data <DATA> --out runs/fcn32_base
+  FCN-16s:  python main.py --phase train --model FCN16 --data <DATA> --out runs/fcn16_base
+  FCN-8s :  python main.py --phase train --model FCN8  --data <DATA> --out runs/fcn8_base
+
+
+2) COM SUPERVISAO PROFUNDA (--aux)
+----------------------------------
+Quais ramos o FCN-8s usa = editar AUX_WEIGHTS antes de rodar.
+
+  FCN-8s, 2 ramos (s32 + s16):
+    AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}
+    python main.py --phase train --model FCN8 --aux --data <DATA> --out runs/fcn8_ds_both
+
+  FCN-8s, so o gargalo (s32):
+    AUX_WEIGHTS = {'s32': 0.4}
+    python main.py --phase train --model FCN8 --aux --data <DATA> --out runs/fcn8_ds_s32
+
+  FCN-8s, so stride-16 (s16):
+    AUX_WEIGHTS = {'s16': 0.4}
+    python main.py --phase train --model FCN8 --aux --data <DATA> --out runs/fcn8_ds_s16
+
+  FCN-16s, deep sup (s32)   [AUX_WEIGHTS default serve]:
+    python main.py --phase train --model FCN16 --aux --data <DATA> --out runs/fcn16_ds
+
+
+Alphas diferentes: use valores diferentes, ex. AUX_WEIGHTS = {'s32': 0.5, 's16': 0.3}
+
+OBS: FCN-16s e FCN-32s so tem o ramo s32. Mesmo com AUX_WEIGHTS contendo 's16',
+     eles ignoram automaticamente. So precisa editar AUX_WEIGHTS para restringir
+     o FCN-8s a 1 ramo, ou para mudar os alphas.
+
+
+3) RETOMAR TREINO
+-----------------
+Adicione --param apontando para um checkpoint:
+  python main.py --phase train --model FCN8 --aux --data <DATA> --out runs/fcn8_ds_both --param runs/fcn8_ds_both/FCN-epoch-10.pth
+
+
+4) INFERENCIA (TESTE)
+---------------------
+  python main.py --phase test --model FCN8 --data <IMGS_JPG> --out runs/preds --param runs/fcn8_ds_both/FCN-epoch-XX.pth
+
+  - --aux nao importa no teste (roda em eval(), retorna so a saida principal).
+  - A supervisao profunda NAO adiciona parametros: um checkpoint treinado com
+    --aux e carregado e usado igual a um baseline.
+
+
+5) SAIDAS (na pasta --out)
+--------------------------
+  metrics.csv      -> epoch,train_loss,val_loss,mean_pixel_acc,miou
+  FCN-epoch-N.pth  -> checkpoint por epoca
+  best_epoch.txt   -> melhor epoca e respectiva loss
+
+
+6) ABLACAO (experimento do artigo)
+----------------------------------
+Treine o MESMO modelo com e sem --aux (mesmas epocas), e compare o metrics.csv
+dos dois --out. Ex.: runs/fcn8_base vs runs/fcn8_ds_both.

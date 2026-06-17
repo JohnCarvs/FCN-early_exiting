@@ -3,6 +3,7 @@ File adapted from https://github.com/SJTUzhanglj/FCN
 """
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torchvision
 import re
@@ -11,6 +12,7 @@ from data.data import SBDClassSeg, MyTestData
 from utils.transform import Colorize
 from utils.criterion import CrossEntropyLoss2d
 from utils.val_metrics import ConfusionMatrix
+from utils.class_weights import compute_class_weights
 
 from models.FCN_8 import FCN8s
 from models.FCN_16 import FCN16s
@@ -23,6 +25,9 @@ import argparse
 import os
 import sys
 
+#AUX_WEIGHTS = {'s32': 0.4, 's16': 0.4}    # weights for auxiliary losses
+AUX_WEIGHTS = {'s16': 0.4}    # weights for auxiliary losses
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--phase', type=str, default='train', help='train or test')
 parser.add_argument('--param', type=str, default=None, help='path to pre-trained parameters')
@@ -30,13 +35,42 @@ parser.add_argument('--data', type=str, default='./train', help='path to input d
 parser.add_argument('--out', type=str, default='./out', help='path to output data')
 parser.add_argument('--epochs', type=int, default=90, help='total number of training epochs')
 parser.add_argument('--model', type=str, default="FCN8", help='name of the model to run')
+parser.add_argument('--aux', action='store_true', default=False, help='use auxiliary loss')
+parser.add_argument('--class_weights', action='store_true', default=False, help='compute and cache class weights')
+parser.add_argument('--aux_weights', type=str, default=None,
+                    help="auxiliary weights, format 's16:0.4,s32:0.3' (overrides default AUX_WEIGHTS)")
+parser.add_argument('--no_skip', action='store_true', default=False, help='disable skip connections')
+parser.add_argument('--aux_upsample', action='store_true', default=False, help='add upsampling layers for auxiliary outputs')
 opt = parser.parse_args()
 print(opt)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
 
 color_transform = Colorize()
 """parameters"""
 iterNum = opt.epochs
+
+# if provided via CLI, parse and override AUX_WEIGHTS (format: name:weight,name:weight)
+if opt.aux_weights:
+    parsed = {}
+    for token in opt.aux_weights.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        if ':' in token:
+            name, val = token.split(':', 1)
+        elif '=' in token:
+            name, val = token.split('=', 1)
+        else:
+            raise ValueError(f"Invalid --aux_weights token: {token}. Use name:weight")
+        try:
+            parsed[name.strip()] = float(val)
+        except Exception:
+            raise ValueError(f"Invalid weight for {name}: {val}")
+    AUX_WEIGHTS = parsed
+    print('AUX_WEIGHTS set from CLI:', AUX_WEIGHTS)
 
 """data loader"""
 # dataRoot = '/media/xyz/Files/data/datasets'
@@ -45,8 +79,9 @@ dataRoot = opt.data
 os.makedirs(opt.out, exist_ok=True)
 if opt.phase == 'train':
     checkRoot = opt.out
+    train_dataset = SBDClassSeg(dataRoot, split='train', transform=True)
     train_loader = torch.utils.data.DataLoader(
-        SBDClassSeg(dataRoot, split='train', transform=True),
+        train_dataset,
         batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = torch.utils.data.DataLoader(
         SBDClassSeg(dataRoot, split='seg11valid', transform=True),
@@ -63,15 +98,19 @@ print(f"Predicting {n_class} classes")
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s(n_class)
+        model = FCN8s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
     case "FCN16":
-        model = FCN16s(n_class)
+        model = FCN16s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
     case "FCN32":
-        model = FCN32s(n_class)
+        model = FCN32s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
 
 """load checkpoint"""
 if opt.param is None:
-    vgg16 = torchvision.models.vgg16(pretrained=True)
+    try:
+        from torchvision.models import VGG16_Weights
+        vgg16 = torchvision.models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
+    except ImportError:
+        vgg16 = torchvision.models.vgg16(pretrained=True)
     model.copy_params_from_vgg16(vgg16, copy_fc8=False, init_upscore=True)
 else:
     checkpoint = torch.load(opt.param, map_location='cpu')
@@ -80,18 +119,23 @@ else:
     else:
         model.load_state_dict(checkpoint)
 
-criterion = CrossEntropyLoss2d()
+class_weights = None
+if opt.phase == 'train' and opt.class_weights:
+    cache_path = os.path.join(dataRoot, 'class_weights.npy')
+    class_weights = compute_class_weights(train_dataset, n_class, cache_path).to(device)
+    print('class weights:', np.round(class_weights.cpu().numpy(), 3))
+criterion = CrossEntropyLoss2d(weight=class_weights)
 optimizer = torch.optim.Adam(model.parameters(), 0.0001, betas=(0.5, 0.999))
 conf_matrix = ConfusionMatrix(n_class)
 
-model = model.cuda()
+model = model.to(device)
 
 if opt.phase == 'train':
     """train"""
     best_loss = float('inf')
     best_epoch = 0
+    best_miou = -1.0
     start_epoch = 0
-
     if opt.param is not None and isinstance(checkpoint, dict):
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -99,6 +143,8 @@ if opt.phase == 'train':
             best_loss = checkpoint['best_loss']
         if 'best_epoch' in checkpoint:
             best_epoch = checkpoint['best_epoch']
+        if 'best_miou' in checkpoint:
+            best_miou = checkpoint['best_miou']
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
         else:
@@ -120,11 +166,18 @@ if opt.phase == 'train':
         # iterate batches (train)
         model.train()
         for ib, data in enumerate(train_loader):
-            inputs = data[0].cuda()
-            targets = data[1].cuda()
+            inputs = data[0].to(device)
+            targets = data[1].to(device)
             model.zero_grad()
-            outputs = model(inputs)
+            out = model(inputs)
+            outputs, aux_dict = (out[0], out[1]) if isinstance(out, tuple) else (out, {})
             loss = criterion(outputs, targets)
+            for name, w in AUX_WEIGHTS.items():
+                if name not in aux_dict:
+                    continue
+                gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux_dict[name].shape[-2:], 
+                                       mode='nearest').squeeze(1).long()
+                loss = loss + w * criterion(aux_dict[name], gt_low)
             train_epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()
@@ -148,8 +201,8 @@ if opt.phase == 'train':
         conf_matrix.reset()
         with torch.no_grad():
             for ib, data in enumerate(val_loader):
-                inputs = data[0].cuda()
-                targets = data[1].cuda()
+                inputs = data[0].to(device)
+                targets = data[1].to(device)
                 outputs = model(inputs)
                 loss = criterion(outputs, targets)
                 preds = outputs.argmax(dim=1)
@@ -191,32 +244,43 @@ if opt.phase == 'train':
 
 
 
-        if average_val_loss < best_loss:    # instead of using average_val_loss, should we use mIoU??
-            best_loss = average_val_loss
+        # save if mean IoU improved OR periodically every 25 epochs
+        improved = False
+        if miou > best_miou:
+            best_miou = miou
             best_epoch = it
+            improved = True
 
+        periodic_save = (it % 25 == 0)
 
-        filename = ('%s/FCN-epoch-%d.pth' \
-                    % (checkRoot, it))
-        torch.save({
-            'epoch': it,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'best_loss': best_loss,
-            'best_epoch': best_epoch,
-        }, filename)
-        print('save: (epoch: %d)' % (it))
-
-        with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
-            f.write('Best epoch: %d with loss: %.4f' % (best_epoch, best_loss))
+        if improved or periodic_save:
+            filename = ('%s/FCN-epoch-%d.pth' \
+                        % (checkRoot, it))
+            torch.save({
+                'epoch': it,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_loss': best_loss,
+                'best_epoch': best_epoch,
+                'best_miou': best_miou,
+            }, filename)
+            if improved:
+                print('saved checkpoint (epoch: %d) with new best mIoU: %.4f' % (it, best_miou))
+                with open(os.path.join(checkRoot, 'best_epoch.txt'), 'w') as f:
+                    f.write('Best epoch: %d with mIoU: %.4f' % (best_epoch, best_miou))
+            else:
+                print('periodic save: checkpoint (epoch: %d) saved (mIoU=%.4f)' % (it, miou))
+        else:
+            print('no improvement in mIoU (epoch: %d: mIoU=%.4f), checkpoint not saved' % (it, miou))
 
         # write losses to csv
         with open(os.path.join(checkRoot, 'metrics.csv'), 'a') as f:
             f.write('%d,%.4f,%.4f,%.4f,%.4f\n' % (it, average_train_loss, average_val_loss, mean_pixel_acc, miou))
 else:
+    model.eval()
     for ib, data in enumerate(loader):
         print('testing batch %d' % ib)
-        inputs = data[0].cuda()
+        inputs = data[0].to(device)
         outputs = model(inputs)
         hhh = color_transform(outputs[0].detach().cpu().max(0)[1])
         imsave(os.path.join(outputRoot, data[1][0] + '.png'), hhh)
