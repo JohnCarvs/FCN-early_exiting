@@ -12,6 +12,10 @@ data/
 *.tgz
 *.mat
 
+# ...but keep paper figures
+!paper/**/*.jpg
+!paper/**/*.png
+
 # Checkpoints 
 *.pth
 
