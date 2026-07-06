@@ -23,6 +23,10 @@
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{float}
+\usepackage{tabularx}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\usepackage{subfig}
+\usepackage{placeins}
 \begin{document}
 %
 \title{Understanding the Interaction Between Deep Supervision and Skip Connections in Fully Convolutional Networks}
@@ -35,6 +39,8 @@
 Lucas de Oliveira Ferreira}
 %
 \authorrunning{J. Silva, L. Ferreira}
+
+
 % First names are abbreviated in the running head.
 % If there are more than two authors, 'et al.' is used.
 %
@@ -82,30 +88,27 @@ applied to FCN-style architectures.
     
     Image segmentation is used in many important tasks, such as in healthcare for detecting tumors, organs, or blood vessels in medical imaging; in autonomous driving to help self-driving cars identify lane markings, road signs, obstacles, and pedestrians; and in satellite imagery to analyze land use, urban growth, and agricultural zones. It works by classifying each pixel of an image into a class in order to segment the objects.
     
-    The Fully Convolutional Network (FCN)~\cite{ref_fcn} is a well-known architecture for image segmentation. It works similarly to an encoder-decoder architecture, but it adds skip connections to recover spatial data lost in the feature-extraction process.
+    The Fully Convolutional Network (FCN) is a well-known architecture for image segmentation explored by \cite{ref_fcn}. It works similarly to an encoder-decoder architecture, but it adds skip connections to recover spatial data lost in the feature-extraction process.
     
     \subsection{Deep Supervision}
 
     In this paper, we investigate how auxiliary exits affect the performance of Fully Convolutional Networks for semantic segmentation. Deep supervision has been successfully used to improve optimization and facilitate gradient propagation, as demonstrated by GoogLeNet \cite{ref_googlenet}. However, its effectiveness in FCN-based segmentation architectures has not been thoroughly investigated. In particular, it remains unclear how auxiliary supervision interacts with the skip connections used by FCNs, and whether its impact depends on where the auxiliary loss is applied. This work addresses these questions through a systematic experimental study.
-
-    % parágrafo ficou meio informal?
-    % melhorei um pouco
     
     
     \subsection{Gap}
     
     Although auxiliary heads have been widely studied, the literature has not yet explored how they interact with skip connections. We exploit a structural property of the FCN decoder: its score layers map features to exactly one channel per class, so each intermediate score map is already a per-pixel class-score map (a segmentation prediction), only at a coarser, strided resolution. A per-pixel argmax over its channels therefore yields a valid low-resolution segmentation, which lets us treat the map as an auxiliary exit and supervise it directly with a downsampled label.
 
+    % como sabemos que durante o upsample, os mapas se comportam como segmentação em baixa resolução?
+
     
     \subsection{Contributions}
     
-    (1) Wide evaluation on FCN-8s, FCN-16s and FCN-32s; (2) Ablation over the deep supervision locations; (3) Several auxiliary weights; (4) Removal of skip connections; (5) Auxiliary upsampling branches; (6) Analysis of the interaction between supervision and skip connections
-    
-    %To better compare with the literature, we also follow the original FCN approach: we train the models on the SBD dataset and fine-tune the pre-trained FCN weights on the VOC 2011 samples. 
+    (1) Wide evaluation on FCN8, FCN16 and FCN32; (2) Ablation over the deep supervision locations; (3) Several auxiliary weights; (4) Removal of skip connections; (5) Auxiliary upsampling branches; (6) Analysis of the interaction between supervision and skip connections
     
     To better compare with the literature, we also follow the original FCN approach: we train the models on the SBD dataset and fine-tune them on the VOC 2011 samples.
 
-    % pre-trained? não fica confuso?
+    Our main finding is that auxiliary supervision before skip fusion consistently hurts performance, whereas supervision after the first skip fusion improves optimization.
     
 
 \section{Related Work}
@@ -115,11 +118,11 @@ applied to FCN-style architectures.
 
     The original FCN models have three variants that differ only in the decoding strategy, as Figure \ref{fig_fcns} shows, sharing the same VGG-16 encoder and classifier.
     
-    FCN-32s is the simplest of them, as it upsamples the stride-32 map with a single x32 transposed convolution, and it has no skip connections.
-
-    FCN-16s introduces a single skip connection. The stride-32 map is upsampled by a factor of x2 and fused with a skip connection at stride-16. Lastly, it performs an x16 upscale to produce the final segmentation at the original resolution.
-
-    FCN-8s extends the skip-connection idea and is more complex. At stride-32, it performs an x2 upscale and then fuses a stride-16 skip connection. It then performs another x2 upscale and adds a second skip connection, this time from a stride-8 score map. Finally, it applies an x8 upscale at stride-8 to recover the original image resolution.
+    FCN32 is the simplest of them, as it upsamples the stride-32 map with a single x32 transposed convolution, and it has no skip connections.
+    
+    FCN16 introduces a single skip connection. The stride-32 map is upsampled by a factor of x2 and fused with a skip connection at stride-16. Lastly, it performs an x16 upscale to produce the final segmentation at the original resolution.
+    
+    FCN8 extends the skip-connection idea and is more complex. At stride-32, it performs an x2 upscale and then fuses a stride-16 skip connection. It then performs another x2 upscale and adds a second skip connection, this time from a stride-8 score map. Finally, it applies an x8 upscale at stride-8 to recover the original image resolution.
 
     \begin{figure}
     \includegraphics[width=\textwidth]{figures/fcn.jpg}
@@ -127,15 +130,45 @@ applied to FCN-style architectures.
     \label{fig_fcns}
     \end{figure}
     
-    Throughout this work, we refer to the intermediate prediction produced from the stride-32 feature map as ``s32'', and to the fused prediction after the first skip connection at stride 16 as ``s16''. Thus, s16 incorporates information from both the upsampled deep representation and the first skip connection, which makes it different from the original stride-16 features.
+    Throughout this work, we refer to the intermediate prediction produced from the stride-32 feature map as ``s32'', and to the fused prediction after the first skip connection at stride 16 as ``s16''. So, s16 incorporates information from both the upsampled deep representation and the first skip connection, which makes it different from the original stride-16 features.
 
      
     \subsection{Deep Supervision}
-    The idea of guiding intermediate layers with auxiliary objectives dates back to multitask learning~\cite{ref_multitask}, where several objectives are optimized jointly, and to learning from hints~\cite{ref_hints}. GoogLeNet \cite{ref_googlenet} uses discardable auxiliary classifiers, and DSN \cite{ref_dsn} showed that intermediate losses help combat vanishing gradients. For dense prediction, PSPNet \cite{ref_pspnet} adds a single auxiliary loss to an intermediate layer of a ResNet-based architecture, HED \cite{ref_hed} supervises side outputs, and UNet++ \cite{ref_unetpp} places auxiliary losses at several nodes. Unlike early-exiting architectures such as BranchyNet \cite{ref_branchynet}, our auxiliary exits are used only during training and are removed at inference time.
+    The idea of influencing intermediary layers with auxiliary objectives dates back to multitask learning  \cite{ref_multitask} when it comes to having multiple supervisions at the same task, and learning from hints, as \cite{ref_hints} initially explored. GoogLeNet \cite{ref_googlenet} uses discardable auxiliary classifiers, and DSN \cite{ref_dsn} showed that intermediate losses help combat vanishing gradients. For dense prediction, PSPNet \cite{ref_pspnet} adds a single auxiliary loss to an intermediate layer of a ResNet-based architecture, HED \cite{ref_hed} supervises side outputs, and UNet++ \cite{ref_unetpp} places auxiliary losses at several nodes. Unlike early-exiting architectures such as BranchyNet \cite{ref_branchynet}, our auxiliary exits are used only during training and are removed at inference time.
 
-    % comentar mais profundamente sobre o avanço de cada arquitetura?
+    Table~\ref{tab:related} summarizes how these designs differ in where the
+    auxiliary output is taken from, how its loss is computed, and what happens to
+    the branch at inference time. Two aspects distinguish our setting. First, our
+    exits add \emph{no parameters}: the FCN decoder's score maps already have one
+    channel per class, so we supervise them directly instead of attaching a
+    dedicated head. Second, and central to this work, we control \emph{where} the
+    exit sits relative to the skip-connection fusions (before, s32; after, s16);
+    an axis none of the works above examines, since their auxiliary branches are
+    attached to encoder stages or to points whose interaction with skip
+    connections is not isolated.
 
-    
+    \begin{table}[h]
+    \centering
+    \caption{Deep-supervision designs in prior work and in ours. ``Discarded''
+    means the auxiliary branch is removed at inference time. CE = cross-entropy.}
+    \label{tab:related}
+    \small
+    \renewcommand{\arraystretch}{1.2}
+    \begin{tabularx}{\textwidth}{@{}l Y Y l@{}}
+    \toprule
+    Work & Aux.\ output source & Loss / target resolution & At inference \\
+    \midrule
+    GoogLeNet~\cite{ref_googlenet} & conv{+}FC heads on intermediate modules & image-level CE ($w{=}0.3$) & discarded \\
+    DSN~\cite{ref_dsn} & classifier on every hidden layer & image-level margin loss & discarded \\
+    BranchyNet~\cite{ref_branchynet} & added branch subnetworks & image-level CE, jointly weighted & early exit \\
+    HED~\cite{ref_hed} & $1{\times}1$ convs on encoder blocks & per-pixel CE, full resolution (prediction upsampled) & kept (fused) \\
+    PSPNet~\cite{ref_pspnet} & conv head on mid-encoder stage & per-pixel CE ($w{=}0.4$) & discarded \\
+    UNet++~\cite{ref_unetpp} & $1{\times}1$ convs on full-resolution decoder nodes & BCE{+}Dice, full resolution & pruning \\
+    \midrule
+    \textbf{Ours} & decoder score maps, \emph{before/after skip fusion} (parameter-free) & per-pixel CE, native stride resolution (label downsampled) & discarded \\
+    \bottomrule
+    \end{tabularx}
+    \end{table}
 
 
 \section{Proposed Method}
@@ -159,10 +192,10 @@ applied to FCN-style architectures.
     $1{\times}1$ convolutions that project the intermediate encoder features onto
     the same per-class score space, $\mathrm{up}(\cdot)$ is a transposed
     convolution (bilinearly initialized), $\mathrm{crop}(\cdot)$ trims the
-    upsampled map to the input size, and each sum is a skip connection. We define
-    two auxiliary exit points: ``s32'', on \texttt{score5} (the bottleneck,
-    \emph{before} any fusion), and ``s16'', on \texttt{score4} (\emph{after} the
-    first fusion).
+    upsampled map to the input size, and each sum is a skip connection.
+     We define two auxiliary exit
+    points: ``s32'', on \texttt{score5} (the bottleneck, \emph{before} any
+    fusion), and ``s16'', on \texttt{score4} (\emph{after} the first fusion).
     FCN-16s has only the stride-16 fusion and FCN-32s has none (its output is
     \texttt{score5} upsampled directly).
     
@@ -179,8 +212,8 @@ applied to FCN-style architectures.
     \end{equation}
     where $Y$ is the ground truth and $Y_{\downarrow a}$ is $Y$ \emph{downsampled}
     (nearest neighbor) to the resolution of $P_a$. Supervising at the native low
-    resolution (downsampling the label), a choice also made in edge detection~\cite{ref_hed}, is our default approach, although we also tried training with an upscale branch; Sec.~\ref{sec:results}
-    contrasts it with upscaling $P_a$.
+    resolution (downsampling the label) is our default approach, although we also tried training with an upscale branch; Sec.~\ref{sec:results} contrasts it with upscaling $P_a$.
+
 
 
     \subsection{Auxiliary Supervision Strategies}
@@ -188,12 +221,13 @@ applied to FCN-style architectures.
     We compare two ways of matching the auxiliary prediction and the label:
     (i) \emph{downsampling} the label to the map resolution (default), and
     (ii) \emph{upscaling} the prediction to the original resolution, either with a
-    learnable transposed convolution or with fixed bilinear interpolation.
+    learnable transposed convolution or with fixed bilinear interpolation --- the
+    strategy HED uses for its side outputs~\cite{ref_hed}.
 
     \subsection{Skip-Connection Removal}
     
     To test whether auxiliary exits and skip connections interact, we also train
-    FCN-8s with the skip connections removed (the output then flows only through
+    FCN8s with the skip connections removed (the output then flows only through
     the deep path), with and without the auxiliary exit.
     
     \subsection{Loss Weights}
@@ -203,12 +237,15 @@ applied to FCN-style architectures.
 
     \subsection{Datasets and Setup}
 
-    Following the original FCN protocol~\cite{ref_fcn}, we first train the models on the Semantic Boundaries Dataset (SBD), using its official training split of 8,498 images. Fine-tuning and evaluation are then performed on the PASCAL VOC 2011 segmentation dataset, using the official training split (1,112 images) for training and the validation split (1,111 images) for evaluation. During SBD training, the official validation split (2,857 images) is used for model selection.
+    Following the original FCN protocol~\cite{ref_fcn}, we first trained the models on the Semantic Boundaries Dataset (SBD), using its official training split of 8,498 images. Fine-tuning and evaluation were then performed on the PASCAL VOC2011 segmentation dataset, using the official training split (1,112 images) for training and the validation split (1,111 images) for evaluation. During SBD training, the official validation split (2,857 images) was used for model selection.
     All models use a VGG-16 encoder initialized from ImageNet-pretrained weights, and
     images are fed at their native resolution (mean-RGB subtraction only, no resizing
     or cropping), so the batch size is~1. We train for 200 epochs with per-pixel
-    cross-entropy loss (void pixels ignored) and the Adam optimizer (learning rate
-    $10^{-4}$, $\beta_1{=}0.5$, $\beta_2{=}0.999$), reporting mIoU and mean per-class
+    cross-entropy loss (void pixels ignored) and the Adam optimizer (learning rate is 
+    $10^{-5}$ when fine-tuning on VOC2011, and $10^{-4}$ when training on SBD dataset,
+    %10^{-4}$
+    $\beta_1{=}0.5$, $\beta_2{=}0.999$
+    ), reporting mIoU and mean per-class
     pixel accuracy with validation at each epoch. Experiments ran either on a single
     NVIDIA RTX 6000 (48\,GB) or a single NVIDIA Titan X (12\,GB).
     
@@ -293,39 +330,50 @@ applied to FCN-style architectures.
 
     \subsection{RQ1: Does deep supervision improve FCN segmentation?}
     
-    We first evaluate whether adding auxiliary supervision improves the
-    baseline FCN architectures.
+    %We first evaluate whether adding auxiliary supervision improves the
+    %baseline FCN architectures.
     
-    \paragraph{Baselines}
+    %\paragraph{Baselines}
+    %\begin{itemize}
+    %    \item FCN32
+    %    \item FCN16
+    %    \item FCN8
+    %\end{itemize}
+    
+    %\paragraph{Auxiliary supervision at stride 32}
+    %\begin{itemize}
+    %    \item FCN32 + aux(s32)
+    %    \item FCN16 + aux(s32)
+    %    \item FCN8 + aux(s32)
+    %\end{itemize}
+    
+    %\paragraph{Auxiliary supervision at stride 16 (FCN8)}
+    %\begin{itemize}
+    %    \item $\lambda=0.075$
+    %    \item $\lambda=0.10$
+    %    \item $\lambda=0.125$
+    %    \item $\lambda=0.20$
+    %    \item $\lambda=0.40$
+    %\end{itemize}
+    
+    %\paragraph{Multiple auxiliary heads} \hfill\newline 
+    %FCN8 with simultaneous supervision at strides 32 and 16.
+
+    We first evaluate whether auxiliary supervision improves the original FCN architectures. The evaluated configurations are:
+
     \begin{itemize}
-        \item FCN32
-        \item FCN16
-        \item FCN8
+    \item \textbf{Baselines:} FCN32, FCN16, and FCN8.
+    \item \textbf{S32 auxiliary exit:} FCN32+s32 ($\lambda=0.4$), FCN16+s32 ($\lambda=0.4$), FCN8+s32 ($\lambda=0.1,0.4$).
+    \item \textbf{S16 auxiliary exit:} FCN8+s16 ($\lambda\in\{0.075,0.1,0.125,0.2,0.4\}$).
+    \item \textbf{Multiple exits:} FCN8+s16+s32.
     \end{itemize}
-    
-    \paragraph{Auxiliary supervision at stride 32}
-    \begin{itemize}
-        \item FCN32 + aux(s32)
-        \item FCN16 + aux(s32)
-        \item FCN8 + aux(s32)
-    \end{itemize}
-    
-    \paragraph{Auxiliary supervision at stride 16 (FCN8)}
-    \begin{itemize}
-        \item $\lambda=0.075$
-        \item $\lambda=0.10$
-        \item $\lambda=0.125$
-        \item $\lambda=0.20$
-        \item $\lambda=0.40$
-    \end{itemize}
-    
-    \paragraph{Multiple auxiliary heads} \hfill\newline 
-    FCN8 with simultaneous supervision at strides 32 and 16.
+
     
     \subsection{RQ2: Is the interaction with skip connections responsible for the observed behavior?}
     
-    To investigate this hypothesis, we remove the skip connections from FCN-8s and FCN-16s
+    To investigate this hypothesis, we remove the skip connections from FCN8 and FCN16
     and repeat the experiments. For the auxiliary exits, we use $\lambda=0.10$, which performed best in the RQ1 weight sweep.
+    % explicar que lambda=0.1 foi escolhido por ter sido o melhor nos testes anteriores?
     \begin{itemize}
         \item FCN8 (no skip)
         \item FCN8 (no skip + aux s16)
@@ -362,77 +410,87 @@ applied to FCN-style architectures.
     \subsection{RQ1: Auxiliary Supervision Does Not Always Help}
 
     Table~\ref{tab:main} summarizes the SBD results. There is no general rule that
-    auxiliary supervision improves FCNs: some configurations help and others hurt. The best configuration is \textbf{FCN-8s with an s16 exit and $\lambda=0.1$}. In contrast, the s32 exit degrades results in essentially every model with skip connections, and combining s16 and s32 (two exits) does not help.
+    auxiliary supervision improves FCNs: some configurations help and others don't. The best configuration is \textbf{FCN-8s with an s16 exit and $\lambda=0.1$}. In contrast, the s32 exit degrades results in essentially every model with skip connections, and combining s16 and s32 (two exits) does not help.
 
         
-        \begin{table}[H]
+        \begin{table}[!t]
         \centering
         \caption{SBD validation results. ``plateau'' is the mean mIoU over the last 20
-        epochs. Models with a decoder degrade with the bottleneck exit (s32) and
+        epochs; ``mean pixel acc.'' is measured at the best-mIoU epoch. Models with a
+        decoder degrade with the bottleneck exit (s32) and
         improve with the post-fusion exit (s16).}
         \label{tab:main}
-        \begin{tabular}{llcc}
+        \begin{tabular}{llccc}
         \toprule
-        Model & Configuration & best mIoU & plateau mIoU \\
+        Model & Configuration & best mIoU & plateau mIoU & mean pixel acc. \\
         \midrule
-        FCN-32s & baseline & 0.312 & 0.298 \\
-        FCN-32s & + aux s32 ($\lambda{=}0.4$) & 0.318 & 0.298 \\
+        FCN-32s & baseline & 0.312 & 0.298 & 0.416 \\
+        FCN-32s & + aux s32 ($\lambda{=}0.4$) & 0.318 & 0.298 & 0.422 \\
         \midrule
-        FCN-16s & baseline & 0.362 & 0.339 \\
-        FCN-16s & + aux s32 ($\lambda{=}0.4$) & 0.327 & 0.306 \\
+        FCN-16s & baseline & 0.362 & 0.339 & 0.466 \\
+        FCN-16s & + aux s32 ($\lambda{=}0.4$) & 0.327 & 0.306 & 0.421 \\
         \midrule
-        FCN-8s & baseline & 0.359 & 0.341 \\
-        FCN-8s & + aux s32 ($\lambda{=}0.1$) & 0.336 & 0.311 \\
-        FCN-8s & + aux s16+s32 ($\lambda{=}0.4$) & 0.331 & 0.306 \\
-        \textbf{FCN-8s} & \textbf{+ aux s16 ($\lambda{=}0.1$)} & \textbf{0.363} & \textbf{0.350} \\
+        FCN-8s & baseline & 0.359 & 0.341 & 0.461 \\
+        FCN-8s & + aux s32 ($\lambda{=}0.1$) & 0.336 & 0.311 & 0.420 \\
+        FCN-8s & + aux s16+s32 ($\lambda{=}0.4$) & 0.331 & 0.306 & 0.440 \\
+        \textbf{FCN-8s} & \textbf{+ aux s16 ($\lambda{=}0.1$)} & \textbf{0.363} & \textbf{0.350} & 0.457 \\
         \bottomrule
         \end{tabular}
         \end{table}
 
-        \begin{figure}[H]\centering
-          \includegraphics[width=0.75\textwidth]{figures/fig2_s16_vs_s32.pdf}
-          \caption{FCN-8s on SBD: the post-fusion s16 exit improves over the baseline,
-          while the pre-fusion s32 exit degrades it ($\lambda{=}0.1$). Metrics are computed on the SBD validation set at each epoch.}
-          \label{fig:s16s32}
-        \end{figure}
 
     
     
     
     \paragraph{Position Matters More Than Weight:}
     When we vary $\lambda$ on the FCN-8s s16 exit, the weight changes the magnitude of the effect ($\lambda=0.1$ is best; large values such as $0.4$ wash the gain out), but the main factor is where the exit is placed: the gap between s16 and s32 is larger than any variation caused by $\lambda$.  
+       
+        \begin{figure}[!h]\centering
+          \includegraphics[width=0.75\textwidth]{figures/fig2_s16_vs_s32.pdf}
+          \caption{FCN-8s on SBD: the post-fusion s16 exit improves over the baseline,
+          while the pre-fusion s32 exit degrades it ($\lambda{=}0.1$). The metrics were evaluated from a SBD validation set, at each epoch. Curves are smoothed with a 5-epoch moving average; faint lines show the raw values.
+        }
+          \label{fig:s16s32}
+        \end{figure}
 
     \paragraph{Why s32 Hurts and s16 Helps:}
     The difference appears to be related to what each tensor represents at the point of supervision. The s16 exit supervises score4 after fusion, a map that already combines score5 and deep spatial detail (feat4); it is naturally aligned with the segmentation objective, so reinforcing it helps optimization without interfering with the skip connections. The s32 exit supervises score5 before any fusion. On the main path, score5 is used through a learnable transposed convolution followed by a sum, giving the network freedom to shape its contribution. By supervising it directly, the auxiliary loss might remove that freedom and force it to be a good classifier, competing with the fine-grained objective of the main output for the shared weights. 
-
+    
     \subsection{RQ2: The No-Skip Experiment}
     \label{sec:noskip}
-    To isolate the effect of the skip connections, we remove them from FCN-8s and FCN-16s. As expected, the performance drops; however, the relative gain from the auxiliary exit increases: on FCN-8s, with skips, the s16 exit improves the plateau by $+0.008$ (0.341$\rightarrow$0.350), while without skips it improves by $+0.020$ (0.281$\rightarrow$0.301), as shown in Table~\ref{tab:noskip}. This suggests that when skip connections exist, they already provide an efficient path for information and gradient, with which auxiliary supervision may compete, and that when they are removed, the supervision partially compensates for their absence, supporting a strong interaction between the two mechanisms.
+    To isolate the effect of the skip connections, we remove them from FCN-8 and FCN-16. As expected, the performance drops; however, the relative gain from the auxiliary exit increases: on FCN-8, with skips, the s16 exit improves the plateau by $+0.008$ (0.341$\rightarrow$0.350), while without skips it improves by $+0.020$ (0.281$\rightarrow$0.301), as shown in Table~\ref{tab:noskip}. This suggests that when skip connections exist, they already provide an efficient path for information and gradient, with which auxiliary supervision may compete, and that when they are removed, the supervision partially compensates for their absence, supporting a strong interaction between the two mechanisms.
     
-    \begin{figure}[t]\centering
-      \includegraphics[width=0.75\textwidth]{figures/fig3_noskip.pdf}
-      \caption{FCN-8s with and without skip connections: removing the skips lowers
-      absolute mIoU, but the relative gain of the s16 exit grows ($+0.020$ vs.\
-      $+0.008$ in plateau mIoU). Metrics are computed on the SBD validation set at each epoch.}
+    \begin{figure}[h]\centering
+      \includegraphics[width=\textwidth]{figures/fig3_noskip.pdf}
+      \caption{(a) FCN-8s and (b) FCN-16s with and without skip connections. Solid curves are the normal
+      models (with skip connections) and dashed curves their no-skip variants.
+      Removing the skips lowers absolute mIoU, but the relative gain of the
+      auxiliary exit grows (FCN-8s: $+0.020$ vs.\ $+0.008$; FCN-16s: $+0.009$ in
+      plateau mIoU). Panel (b) also shows the interaction directly: the s32 exit
+      degrades FCN-16s while its skip connection is present (solid,
+      $\lambda{=}0.4$) but becomes helpful once the skip is removed (dashed,
+      $\lambda{=}0.1$). Metrics are computed on the SBD validation set at each
+      epoch. Curves are smoothed with a 5-epoch moving average; faint lines show
+      the raw values.}
       \label{fig:noskip}
     \end{figure}
 
-    \begin{table}[H]
+    \begin{table}[h]
     \centering
-    \caption{Effect of auxiliary supervision after removing skip connections. ``plateau'' is the mean mIoU over the last 20 epochs.}
+    \caption{Effect of auxiliary supervision after removing skip connections. ``plateau'' is the mean mIoU over the last 20 epochs; ``mean pixel acc.'' is measured at the best-mIoU epoch.}
     \label{tab:noskip}
-    \begin{tabular}{llcc}
+    \begin{tabular}{llccc}
     \toprule
-    Model & Configuration & best mIoU & plateau mIoU \\
+    Model & Configuration & best mIoU & plateau mIoU & mean pixel acc. \\
     \midrule
-    FCN-8s  & baseline             & 0.359 & 0.341 \\
-    FCN-8s  & + aux s16 ($\lambda=0.1$) & 0.363 & 0.350 \\
+    FCN-8s  & baseline             & 0.359 & 0.341 & 0.461 \\
+    FCN-8s  & + aux s16 ($\lambda=0.1$) & 0.363 & 0.350 & 0.457 \\
     \midrule
-    FCN-8s (no skip)  & baseline             & 0.294 & 0.281 \\
-    FCN-8s (no skip)  & + aux s16 ($\lambda=0.1$) & 0.313 & 0.301 \\
+    FCN-8s (no skip)  & baseline             & 0.294 & 0.281 & 0.397 \\
+    FCN-8s (no skip)  & + aux s16 ($\lambda=0.1$) & 0.313 & 0.301 & 0.418 \\
     \midrule
-    FCN-16s (no skip) & baseline             & 0.309 & 0.298 \\
-    FCN-16s (no skip) & + aux s32 ($\lambda=0.1$) & 0.321 & 0.307 \\
+    FCN-16s (no skip) & baseline             & 0.309 & 0.298 & 0.411 \\
+    FCN-16s (no skip) & + aux s32 ($\lambda=0.1$) & 0.321 & 0.307 & 0.425 \\
     \bottomrule
     \end{tabular}
     \end{table}
@@ -440,28 +498,34 @@ applied to FCN-style architectures.
     
     \paragraph{The Role of FCN-32s and the Architectural Gradient:}
     FCN-32s reinforces the argument: having no skip connections, its s32 exit nearly coincides with the final output, leaving no later fusion stage to be harmed (and indeed the effect is neutral): plateau 0.298 with and without the exit. The behavior across the FCNs indicates that the phenomenon is tied to the skip-connection fusions, not only to the depth of the auxiliary exit. 
-    \subsection{RQ3: Downsampling the Label Beats Upscaling the Prediction}
-    We also supervise the auxiliary exit at the original resolution by upscaling $P_a$ with (a) a learnable deconvolution and (b) bilinear interpolation, instead of downsampling the label. Neither helped; both hurt (Table~\ref{tab:res}). The learnable deconvolution was the worst (plateau 0.308, below the 0.341 baseline) and bilinear interpolation was intermediate. Comparing the three strategies at the same s16 exit, over a matched epoch window, yields the ordering \emph{label downsampling} $>$ \emph{baseline} $\approx$ \emph{interpolation} $>$ \emph{deconvolution}. We draw two conclusions: (i) inserting learnable layers between the auxiliary exit and the loss increases optimization complexity without adding information (deconvolution is worse than interpolation), and (ii) upscaling a coarse map to match the fine label is itself worse than matching at the native resolution, which provides a more reasonable target and supervises the representation directly.
     
-    \begin{figure}[t]\centering
+    \subsection{RQ3: Is downscaling the dataset the problem?}
+    
+    \begin{figure}[h]\centering
       \includegraphics[width=0.75\textwidth]{figures/fig4_resolution.pdf}
       \caption{FCN-8s s16 exit: downsampling the label (native resolution) beats
       upscaling the prediction by bilinear interpolation or learnable
-      deconvolution; the latter falls below the baseline.}
+      deconvolution; the latter falls below the baseline. Metrics are computed on
+      the SBD validation set at each epoch. Curves are smoothed with a 5-epoch
+      moving average; faint lines show the raw values.
+      }
       \label{fig:resolution}
     \end{figure}
+    
+    We also supervise the auxiliary exit at the original resolution by upscaling $P_a$ with (a) a learnable deconvolution and (b) bilinear interpolation, instead of downsampling the label. Neither helped; both hurt (Table~\ref{tab:res}). The learnable deconvolution was the worst (plateau 0.308, below the 0.341 baseline) and bilinear interpolation was intermediate. Comparing the three strategies at the same s16 exit, over a matched epoch window, yields the ordering \emph{label downsampling} $>$ \emph{baseline} $\approx$ \emph{interpolation} $>$ \emph{deconvolution}. We draw two conclusions: (i) inserting learnable layers between the auxiliary exit and the loss increases optimization complexity without adding information (deconvolution is worse than interpolation), and (ii) upscaling a coarse map to match the fine label is itself worse than matching at the native resolution, which provides a more reasonable target and supervises the representation directly. Conclusion (i) echoes HED, which likewise reported no benefit from learned deconvolutions over fixed interpolation for its side outputs~\cite{ref_hed}.
+    
 
-    \begin{table}[t]
+    \begin{table}[h]
     \centering
-    \caption{Comparison of different strategies for matching the auxiliary prediction to the ground-truth labels in FCN-8s (s16, $\lambda=0.1$). ``plateau'' is the mean mIoU over the last 20 epochs.}
+    \caption{Comparison of different strategies for matching the auxiliary prediction to the ground-truth labels in FCN-8s (s16, $\lambda=0.1$). ``plateau'' is the mean mIoU over the last 20 epochs; ``mean pixel acc.'' is measured at the best-mIoU epoch.}
     \label{tab:res}
-    \begin{tabular}{lcc}
+    \begin{tabular}{lccc}
     \toprule
-    Configuration & best mIoU & plateau mIoU \\
+    Configuration & best mIoU & plateau mIoU & mean pixel acc. \\
     \midrule
-    Label downsampling (ours) & 0.363 & 0.350 \\
-    Bilinear interpolation & 0.356 & 0.337 \\
-    Learnable deconvolution & 0.333 & 0.309 \\
+    Label downsampling (ours) & \textbf{0.363} & \textbf{0.350} & \textbf{0.457} \\
+    Bilinear interpolation & 0.356 & 0.337 & 0.447 \\
+    Learnable deconvolution & 0.333 & 0.309 & 0.442 \\
     \bottomrule
     \end{tabular}
     \end{table}
@@ -490,9 +554,9 @@ applied to FCN-style architectures.
      
     \subsection{RQ4: Fine-tuning on the VOC 2011 dataset}
     We selected the most relevant models (FCN-16s and FCN-8s baselines,
-    and FCN-8s + s16 with $\lambda=0.1$) and fine-tuned them on the VOC 2011 dataset, using the weights trained on SBD. Although absolute values remain below those reported in the original work~\cite{ref_fcn}, the trend holds: the auxiliary-exit model keeps its advantage over the baseline in terms of mIoU. The effect is thus not specific to SBD.
+    and FCN-8s + s16 with $\lambda=0.1$) and fine-tuned them on the VOC 2011 dataset, using the weights trained on SBD. Although absolute values remain below those reported in the original work~\cite{ref_fcn}, the trend holds: the auxiliary-exit model keeps its advantage over the baseline when looking at mIoU. The effect is thus not specific to SBD.
     
-    \begin{table}[t]
+    \begin{table}[h]
     \centering
     \caption{Fine-tuning on VOC 2011: the advantage of the auxiliary exit persists. Metrics are computed on the VOC 2011 validation set (best epoch).}
     \label{tab:voc}
@@ -507,10 +571,108 @@ applied to FCN-style architectures.
     \end{tabular}
     \end{table}
 
+    \FloatBarrier
+    \subsection{Qualitative Results}
+    
+    \subsubsection{SBD samples}
+
+    Here, we use the models trained only on SBD
+    
+    \begin{figure}[h]
+    \centering
+    
+    \subfloat[Input image]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_003133.jpg}}
+    \hfill
+    \subfloat[Ground Truth]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_003133_gt_color.png}}
+    \hfill
+    \subfloat[FCN8 baseline]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_003133_pred.png}}
+    \hfill
+    \subfloat[FCN8 + aux s16 ($0.1$)]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_003133_pred_s16.png}}
+    
+    \caption{Qualitative segmentation example.}
+    \label{fig:seg_sample_fcns}
+    \end{figure}
+ 
+    
+    \begin{figure}[h]
+    \centering
+    
+    \subfloat[Input image]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_000699.jpg}}
+    \hfill
+    \subfloat[Ground Truth]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_000699_gt_color.png}}
+    \hfill
+    \subfloat[FCN8 baseline]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_000699_pred.png}}
+    \hfill
+    \subfloat[FCN8 + aux s16 ($0.1$)]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/SBD/2008_000699_pred_s16.png}}
+    
+    \caption{Qualitative segmentation example.}
+    \label{fig:seg_sample_fcns}
+    \end{figure}
+    
+    \FloatBarrier
+    \subsubsection{VOC samples}
+
+    Here, we use the models that were trained on SBD and finetuned on VOC
+    
+    \begin{figure}[h]
+    \centering
+    
+    \subfloat[Input image]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2008_000120.jpg}}
+    \hfill
+    \subfloat[Ground Truth]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2008_000120_gt_color.png}}
+    \hfill
+    \subfloat[FCN8 baseline]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2008_000120_pred.png}}
+    \hfill
+    \subfloat[FCN8 + aux s16 ($0.1$)]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2008_000120_pred_s16.png}}
+    
+    \caption{Qualitative segmentation example.}
+    \label{fig:seg_sample_fcns}
+    \end{figure}
+    
+    
+    \begin{figure}[h]
+    \centering
+    
+    \subfloat[Input image]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2009_003938.jpg}}
+    \hfill
+    \subfloat[Ground Truth]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2009_003938_gt_color.png}}
+    \hfill
+    \subfloat[FCN8 baseline]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2009_003938_pred.png}}
+    \hfill
+    \subfloat[FCN8 + aux s16 ($0.1$)]{%
+    \includegraphics[width=0.245\linewidth,trim=20 20 20 20, clip]{figures/segmentation_samples/VOC/2009_003938_pred_s16.png}}
+    
+    \caption{Qualitative segmentation example.}
+    \label{fig:seg_sample_fcns}
+    \end{figure}
+    
+\FloatBarrier
 \section{Conclusion}
-In this paper, we investigated how auxiliary exits interact with the skip connections of the FCN architecture in the image segmentation task.
-Supervising deep feature maps in a fully convolutional architecture can be beneficial, but it depends largely on where the auxiliary exit is placed. It is likely that supervising the feature maps before they are fused with skip connections can harm performance.
-Although fully understanding what happens inside a network remains difficult, we believe this study takes a concrete step toward that goal, and we hope it offers practical guidance for applying deep supervision to FCN-style architectures.
+%In this paper, we investigated how auxiliary exits interact with the skip connections of the FCN architecture in the image segmentation task.
+%Our experiments consistently showed that the effectiveness of supervising deep feature maps depends less on the exits existence, and more on the interaction with the decoder topology. In FCN networks, supervising deep feature maps can enhance the prediction depending largely on where the auxiliary exit is placed, since supervising the feature maps before they are fused with skip connections can harm performance.
+%Although fully understanding what happens inside a network remains difficult, we believe this study takes a concrete step toward that goal, and we hope it offers practical guidance for applying deep supervision to FCN-style architectures.
+
+In this paper, we investigated how auxiliary exits interact with the skip connections in Fully Convolutional Networks for semantic segmentation.
+Our experiments consistently indicate that the effectiveness of deep supervision depends less on the mere presence of auxiliary exits than on how they interact with the decoder architecture.
+In particular, we found that supervising deep feature maps can either improve or degrade segmentation performance depending on where the auxiliary exit is placed.
+Supervising feature maps before they are fused through skip connections tends to impair performance, whereas supervising the fused representations can be beneficial.
+Although the internal optimization dynamics of deep neural networks remain difficult to fully explain, we believe this work represents a step toward a better understanding of these interactions and provides practical insights for applying deep supervision to FCN-based architectures.
+
 
 %
 \begin{thebibliography}{99}
@@ -560,12 +722,15 @@ U-Net architecture for medical image segmentation. In: DLMIA, pp. 3--11 (2018)
 \bibitem{ref_branchynet}
 Teerapittayanon, S., McDanel, B., Kung, H.T.: BranchyNet: Fast inference via
 early exiting from deep neural networks. In: ICPR, pp. 2464--2469 (2016)
+
+
+\bibitem{ref_voc}
+M. Everingham, L. Van Gool, C. K. I. Williams, J. Winn,
+and A. Zisserman: The PASCAL Visual Object Classes
+Challenge 2011 (VOC2011) Results. 
+
 \end{thebibliography}
 \end{document}
-
-
-
-
 
 \section{First Section}
 \subsection{A Subsection Sample}
