@@ -48,8 +48,24 @@ parser.add_argument('--aux_upsample', action='store_true', default=False, help='
 parser.add_argument('--aux_interp', action='store_true', default=False, help='aux loss em resolucao cheia via F.interpolate (sem params); use SEM --aux_upsample')
 parser.add_argument('--seed', type=int, default=None, help='random seed for training and data shuffling')
 parser.add_argument('--deterministic', action='store_true', default=False, help='force deterministic cudnn behavior when using a seed')
+parser.add_argument('--log_grad_align', action='store_true', default=False,
+                    help='mede o alinhamento grad(L_aux) x grad(L_main) dos exits s16/s32 durante o treino '
+                         '(medicao apenas; NAO adiciona as losses auxiliares ao treino). Requer FCN8.')
+parser.add_argument('--align_every', type=int, default=40,
+                    help='mede o alinhamento a cada N batches de treino (~213 amostras/epoca no SBD com N=40)')
 opt = parser.parse_args()
 print(opt)
+
+if opt.log_grad_align:
+    if opt.model != 'FCN8':
+        raise SystemExit('--log_grad_align so suporta FCN8 (exits s16/s32)')
+    if opt.aux_upsample:
+        raise SystemExit('--log_grad_align nao suporta --aux_upsample (mediria um tap que nao e o treinado)')
+    if opt.no_skip:
+        raise SystemExit('--log_grad_align nao suporta --no_skip (sem a fusao, o tap s16 vira o proprio '
+                         'upscore5 e a comparacao pre/pos-fusao perde o sentido)')
+    if opt.align_every < 1:
+        raise SystemExit('--align_every deve ser >= 1')
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -135,11 +151,14 @@ if opt.phase in ['train', 'val']:
             val_dataset,
             batch_size=1, shuffle=False, num_workers=4, pin_memory=True)
         n_class = len(VOC2011ClassSeg.class_names)
+    else:
+        raise SystemExit('unknown --dataset %s (use SBD or VOC)' % opt.dataset)
 else:
     outputRoot = opt.out
     loader = torch.utils.data.DataLoader(
         MyTestData(dataRoot, transform=True),
         batch_size=1, shuffle=True, num_workers=4, pin_memory=True)
+    n_class = len(SBDClassSeg.class_names)  # 21 classes PASCAL (fase test nao carrega dataset rotulado)
 
 print(f"Predicting {n_class} classes")
 
@@ -147,7 +166,9 @@ print(f"Predicting {n_class} classes")
 model = opt.model
 match model:
     case "FCN8":
-        model = FCN8s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
+        # aux=True tambem quando so medimos alinhamento: expoe os score maps
+        # (exits sem parametros); as losses auxiliares SO entram no treino se opt.aux
+        model = FCN8s(n_class, aux=(opt.aux or opt.log_grad_align), no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
     case "FCN16":
         model = FCN16s(n_class, aux=opt.aux, no_skip=opt.no_skip, aux_upsample=opt.aux_upsample)
     case "FCN32":
@@ -245,6 +266,13 @@ conf_matrix = ConfusionMatrix(n_class)
 
 model = model.to(device)
 
+align_logger = None
+if opt.log_grad_align:
+    from grad_alignment import AlignmentLogger
+    align_logger = AlignmentLogger(model, aux_interp=opt.aux_interp)
+    print('grad-alignment logging: 1 a cada %d batches -> %s'
+          % (opt.align_every, os.path.join(opt.out, 'grad_align.csv')))
+
 if opt.phase == 'train':
     """train"""
     best_loss = float('inf')
@@ -274,9 +302,17 @@ if opt.phase == 'train':
                 if match:
                     start_epoch = int(match.group(1)) + 1
 
-    if start_epoch == 0 or not os.path.exists(os.path.join(checkRoot, 'losses.csv')):
+    # cabecalho apenas em comeco de treino (ou se o csv nunca existiu); um resume
+    # (start_epoch > 0) preserva o historico e continua appendando
+    if start_epoch == 0 or not os.path.exists(os.path.join(checkRoot, 'metrics.csv')):
         with open(os.path.join(checkRoot, 'metrics.csv'), 'w') as f:
             f.write('epoch,train_loss,val_loss,mean_pixel_acc,miou\n')
+    if start_epoch == 0:
+        # treino comecando do zero: um grad_align.csv antigo neste out dir nao
+        # corresponde mais a esta run (remove mesmo sem --log_grad_align)
+        align_csv = os.path.join(checkRoot, 'grad_align.csv')
+        if os.path.exists(align_csv):
+            os.remove(align_csv)
 
     # iterate epochs
     for it in range(start_epoch, iterNum):
@@ -294,17 +330,24 @@ if opt.phase == 'train':
             out = model(inputs)
             outputs, aux_dict = (out[0], out[1]) if isinstance(out, tuple) else (out, {})
             loss = criterion(outputs, targets)
+            loss_main = loss
             for name, w in AUX_WEIGHTS.items():
-                if name not in aux_dict:
+                # gate em opt.aux: com --log_grad_align o aux_dict existe mesmo em
+                # runs baseline, e as losses auxiliares NAO podem entrar no treino
+                if not opt.aux or name not in aux_dict:
                     continue
                 if opt.aux_interp:
                     aux_up = F.interpolate(aux_dict[name], size=targets.shape[-2:],
                                            mode='bilinear', align_corners=False)
                     loss = loss + w * criterion(aux_up, targets)
                 else:
-                    gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux_dict[name].shape[-2:], 
+                    gt_low = F.interpolate(targets.unsqueeze(1).float(), size = aux_dict[name].shape[-2:],
                                        mode='nearest').squeeze(1).long()
                     loss = loss + w * criterion(aux_dict[name], gt_low)
+            if align_logger is not None and ib % opt.align_every == 0:
+                # mede ANTES do backward (grafo vivo); observe() retem o grafo,
+                # entao o backward do treino segue intocado
+                align_logger.observe(criterion, loss_main, aux_dict, targets)
             train_epoch_loss.append(loss.item())
             loss.backward()
             optimizer.step()
@@ -406,6 +449,14 @@ if opt.phase == 'train':
         # write losses to csv
         with open(os.path.join(checkRoot, 'metrics.csv'), 'a') as f:
             f.write('%d,%.4f,%.4f,%.4f,%.4f\n' % (it, average_train_loss, average_val_loss, mean_pixel_acc, miou))
+
+        # write per-epoch gradient-alignment row (and reset for the next epoch)
+        if align_logger is not None:
+            align_row = align_logger.summary()
+            AlignmentLogger.write_row(os.path.join(checkRoot, 'grad_align.csv'), it, align_row)
+            print('grad-align: cos16 %+.4f | cos32 %+.4f | diff %+.4f | act16 %+.4f | act32 %+.4f (n=%d)'
+                  % (align_row['cos16_mean'], align_row['cos32_mean'], align_row['paired_diff_mean'],
+                     align_row['cos_act16_mean'], align_row['cos_act32_mean'], align_row['batches']))
 
 elif opt.phase == 'val':
     model.eval()

@@ -10,58 +10,57 @@ is the cosine between grad(L_main) and grad(L_aux) over shared parameters:
     cos < 0  -> they pull in opposite directions (conflict)
 
 Both exits (s16 and s32) are measured in the SAME forward pass, so the
-s16-vs-s32 comparison is exactly paired: same checkpoint, same image, same
+s16-vs-s32 comparison is exactly paired: same weights, same image, same
 dropout state, same g_main. The exits are parameter-free (they reuse the
 decoder score maps), so every parameter touched by an aux loss is shared.
 
-What is reported per checkpoint (CSV row):
+Two ways to use this module:
+
+(1) DURING TRAINING (recommended for the paper's per-epoch curve): main.py
+    --log_grad_align instruments the training loop with AlignmentLogger.
+    On a baseline run the auxiliary losses are computed for MEASUREMENT ONLY
+    and never added to the training loss, so the trajectory stays a true
+    baseline; the measured gradients are counterfactual ("what would the
+    exit's gradient look like here?"). One row per epoch -> grad_align.csv.
+
+(2) POST-HOC over saved checkpoints (this file as a script): same metrics
+    at every saved epoch, no retraining. Usage (from src/):
+      python grad_alignment.py --data <SBD_ROOT> --param "out/FCN-epoch-*.pth" \
+             --periodic_only --out align_baseline.csv
+      python grad_alignment.py --selftest   # synthetic smoke test, no dataset
+
+What is reported per row (epoch/checkpoint):
   - cos16/cos32 (mean, std, sem), frac_conflict (share of batches with cos<0)
   - paired_diff = mean_i(cos16_i - cos32_i) with its sem  <- headline statistic
   - proj16/proj32 = dot(g_aux, g_main)/||g_main||: first-order effect of a unit
     aux step on L_main (multiply by the run's lambda for the training-time pull;
     the cosine itself is invariant to lambda > 0)
   - ratio16/ratio32 = ||g_aux|| / ||g_main|| (unweighted; multiply by lambda)
+  - phi16/phi32 = 2r/(1+r^2): gradient magnitude similarity (PCGrad, Def. 2);
+    lambda-dependent -- for the training-time value use r' = lambda * ratio
   - cos_act16/cos_act32: cosine in ACTIVATION space at the tap tensor
     (dL_aux/d score4 vs dL_main/d score4, and likewise at score5) -- the most
     direct test of whether the main loss wants the score map to move where the
     aux loss pushes it
-  - cos_agg16/cos_agg32: cosine of batch-AGGREGATED gradients (systematic,
-    low-noise version of the mean per-batch cosine)
+  - cos_agg16/cos_agg32: cosine of batch-AGGREGATED gradients (post-hoc mode
+    only; nan during training to keep the overhead low)
   - cos_s16_s32: how similarly the two aux losses pull the shared parameters
   - null_cos: cosine between g_main of consecutive (different) images -- the
     natural "cooperation ceiling" against which cos16/cos32 should be read
     (raw cosines in ~1.3e8 dimensions concentrate near 0; interpret sign and
-    relative ordering, never raw magnitude)
+    relative ordering, never raw magnitude; post-hoc mode only)
   - per-block cosines (features_123/4/5, classifier, score_feat4, upscore_5).
-    Note: the classifier holds ~89% of the aux-reachable parameters, so the
-    overall cosine is dominated by it; compare per-block values only within
-    the same block. s32 reaches only the encoder blocks + classifier.
+    The classifier holds ~89% of the aux-reachable parameters, so the overall
+    cosine is dominated by it; compare per-block values only within a block.
+    s32 reaches only the encoder blocks + classifier.
   - mean L_main / L_aux16 / L_aux32 over the sampled batches
 
-Protocol notes:
-  - Dropout is DISABLED by default (deterministic, reproducible gradients);
-    pass --dropout to measure with training-time dropout active (masks are
-    seeded and shared by both losses within a batch, so the per-batch
-    comparison stays fair either way).
-  - The same --seed fixes the sampled images for every checkpoint and run.
-  - This measures the gradient decomposition of the TRAINING loss construction
-    evaluated at saved checkpoint states; it mirrors main.py's default aux
-    variant (label downsampled, unweighted CE, ignore_index=-1). Checkpoints
-    trained with --aux_upsample are REJECTED (their aux loss went through
-    learned deconvolutions that this script does not replicate); runs trained
-    with --aux_interp or --class_weights must be matched with the
-    corresponding flags here, or the measured gradients are not the trained ones.
-  - Measuring along a model's own trajectory shows the conflict as it happened
-    during that run; for a controlled s16-vs-s32 comparison, ALSO run this on
-    the BASELINE (no-aux) checkpoints -- same weights for both exits, so any
-    difference is attributable purely to the tap location.
-  - Checkpoints are saved both periodically and on mIoU improvement; use
-    --periodic_only so different runs are sampled on the identical epoch grid.
-
-Usage (from src/, same conventions as main.py):
-  python grad_alignment.py --data ./train --param "out/FCN-epoch-*.pth"
-  python grad_alignment.py --data ./train --param out/ --periodic_only --batches 200
-  python grad_alignment.py --selftest        # synthetic smoke test, no dataset needed
+Faithfulness notes: mirrors main.py's default aux variant (label downsampled,
+CE with ignore_index=-1). Checkpoints trained with --aux_upsample are REJECTED;
+--aux_interp / --class_weights runs must be matched with the same flags here.
+Post-hoc measurements are the gradient decomposition evaluated at saved
+checkpoint states under the training loss construction -- a sampled
+reconstruction of the trajectory, not the literal training steps.
 """
 
 import argparse
@@ -82,6 +81,17 @@ BLOCKS = ["features_123", "features_4", "features_5", "classifier",
           "score_feat4", "upscore_5"]
 EXITS = ["s16", "s32"]
 EPS = 1e-12
+
+CSV_COLS = (['epoch', 'batches', 'skipped',
+             'cos16_mean', 'cos16_std', 'cos16_sem', 'frac_conflict16',
+             'cos32_mean', 'cos32_std', 'cos32_sem', 'frac_conflict32',
+             'paired_diff_mean', 'paired_diff_sem',
+             'proj16_mean', 'proj32_mean', 'ratio16_mean', 'ratio32_mean',
+             'phi16_mean', 'phi32_mean',
+             'cos_act16_mean', 'cos_act32_mean', 'cos_s16_s32_mean',
+             'cos_agg16', 'cos_agg32', 'null_cos_mean',
+             'loss_main_mean', 'loss_aux16_mean', 'loss_aux32_mean']
+            + ['cos16_' + b for b in BLOCKS] + ['cos32_' + b for b in BLOCKS])
 
 
 def parse_args():
@@ -163,15 +173,16 @@ def aux_loss(criterion, aux_map, targets, aux_interp):
     return criterion(aux_map, gt_low)
 
 
-def batch_metrics(model, criterion, inputs, targets, params, names, aux_interp):
-    """One forward, both exits; returns a dict of per-batch metrics or None."""
-    out = model(inputs)
-    assert isinstance(out, tuple), 'model must be in train mode with aux=True'
-    h, aux = out
-    taps = {'s16': aux['s16'], 's32': aux['s32']}
+def compute_metrics(loss_main, loss_aux, taps, params, names, keep_flats=True):
+    """All gradients + per-batch metrics from already-computed losses.
 
-    loss_main = criterion(h, targets)
-    loss_aux = {e: aux_loss(criterion, taps[e], targets, aux_interp) for e in EXITS}
+    Every autograd.grad call uses retain_graph=True, so a training
+    loss.backward() may still be called on the same graph afterwards.
+    Returns None on non-finite losses/cosines; otherwise a dict of scalars
+    plus (if keep_flats) the flattened gradients under _g_main/_g_a16/_g_a32.
+    keep_flats=False (in-training mode) skips the ~0.5 GB _g_main concat that
+    the light accumulator would discard anyway.
+    """
     if not (torch.isfinite(loss_main) and all(torch.isfinite(l) for l in loss_aux.values())):
         return None
 
@@ -183,7 +194,7 @@ def batch_metrics(model, criterion, inputs, targets, params, names, aux_interp):
     gm_act = torch.autograd.grad(loss_main, [taps['s16'], taps['s32']],
                                  retain_graph=True, allow_unused=True)
     ga_act16 = torch.autograd.grad(loss_aux['s16'], taps['s16'], retain_graph=True)[0]
-    ga_act32 = torch.autograd.grad(loss_aux['s32'], taps['s32'])[0]
+    ga_act32 = torch.autograd.grad(loss_aux['s32'], taps['s32'], retain_graph=True)[0]
 
     m = {'loss_main': loss_main.item(), 'loss_aux16': loss_aux['s16'].item(),
          'loss_aux32': loss_aux['s32'].item()}
@@ -226,11 +237,132 @@ def batch_metrics(model, criterion, inputs, targets, params, names, aux_interp):
     m['cos_act16'] = cos(gm_act[0].reshape(-1), ga_act16.reshape(-1))
     m['cos_act32'] = cos(gm_act[1].reshape(-1), ga_act32.reshape(-1))
 
-    # full flattened gradients for aggregation / null (moved to CPU by caller)
-    m['_g_main'] = torch.cat([g.reshape(-1) for g in g_main if g is not None])
-    m['_g_a16'] = flats['s16']
-    m['_g_a32'] = flats['s32']
+    # full flattened gradients for aggregation / null (used in post-hoc mode)
+    if keep_flats:
+        m['_g_main'] = torch.cat([g.reshape(-1) for g in g_main if g is not None])
+        m['_g_a16'] = flats['s16']
+        m['_g_a32'] = flats['s32']
     return m
+
+
+class AlignmentAccumulator:
+    """Accumulates per-batch metric dicts and summarizes them into a CSV row.
+
+    full=True additionally keeps CPU sums of the flattened gradients (for the
+    aggregated cosines) and the previous g_main (for the null cosine). That
+    costs ~0.5 GB CPU<->GPU transfer per batch, so it is reserved for the
+    post-hoc script; during training use full=False (those columns become nan).
+    """
+
+    def __init__(self, full=False):
+        self.full = full
+        self.reset()
+
+    def reset(self):
+        self.scalars = []
+        self.skipped = 0
+        self.agg = {}
+        self.prev_g_main = None
+        self.null_list = []
+
+    def add(self, m):
+        if m is None:
+            self.skipped += 1
+            return
+        g_main = m.pop('_g_main', None)
+        g_a16 = m.pop('_g_a16', None)
+        g_a32 = m.pop('_g_a32', None)
+        if self.full and g_main is not None:
+            g_main = g_main.detach().to('cpu')
+            g_a16 = g_a16.detach().to('cpu')
+            g_a32 = g_a32.detach().to('cpu')
+            for k, v in (('g_main', g_main), ('g_a16', g_a16), ('g_a32', g_a32)):
+                self.agg[k] = v if k not in self.agg else self.agg[k] + v
+            if self.prev_g_main is not None and self.prev_g_main.numel() == g_main.numel():
+                self.null_list.append(cos(self.prev_g_main, g_main))
+            self.prev_g_main = g_main
+        self.scalars.append(m)
+
+    def row(self):
+        def col(key):
+            vals = [s[key] for s in self.scalars if key in s and np.isfinite(s[key])]
+            return np.array(vals) if vals else np.array([np.nan])
+
+        c16, c32 = col('cos16'), col('cos32')
+        paired = c16 - c32 if len(c16) == len(c32) else np.array([np.nan])
+        n = max(len(c16), 1)
+        r = {
+            'batches': len(self.scalars), 'skipped': self.skipped,
+            'cos16_mean': c16.mean(), 'cos16_std': c16.std(), 'cos16_sem': c16.std() / np.sqrt(n),
+            'cos32_mean': c32.mean(), 'cos32_std': c32.std(), 'cos32_sem': c32.std() / np.sqrt(n),
+            'frac_conflict16': float((c16 < 0).mean()), 'frac_conflict32': float((c32 < 0).mean()),
+            'paired_diff_mean': paired.mean(), 'paired_diff_sem': paired.std() / np.sqrt(n),
+            'proj16_mean': col('proj16').mean(), 'proj32_mean': col('proj32').mean(),
+            'ratio16_mean': col('ratio16').mean(), 'ratio32_mean': col('ratio32').mean(),
+            'phi16_mean': col('phi16').mean(), 'phi32_mean': col('phi32').mean(),
+            'cos_act16_mean': col('cos_act16').mean(), 'cos_act32_mean': col('cos_act32').mean(),
+            'cos_s16_s32_mean': col('cos_s16_s32').mean(),
+            'cos_agg16': cos(self.agg['g_main'], self.agg['g_a16']) if self.agg else float('nan'),
+            'cos_agg32': cos(self.agg['g_main'], self.agg['g_a32']) if self.agg else float('nan'),
+            'null_cos_mean': float(np.mean(self.null_list)) if self.null_list else float('nan'),
+            'loss_main_mean': col('loss_main').mean(),
+            'loss_aux16_mean': col('loss_aux16').mean(), 'loss_aux32_mean': col('loss_aux32').mean(),
+        }
+        for s in ('16', '32'):
+            for b in BLOCKS:
+                r['cos%s_%s' % (s, b)] = col('cos%s_%s' % (s, b)).mean()
+        return r
+
+
+class AlignmentLogger:
+    """In-training measurement hook (used by main.py --log_grad_align).
+
+    Call observe() on sampled batches BEFORE loss.backward() -- the internal
+    autograd.grad calls all retain the graph, so training proceeds untouched.
+    The auxiliary losses computed here are for measurement only; they are
+    never returned and never added to the training loss.
+    """
+
+    def __init__(self, model, aux_interp=False):
+        self.names, self.params = zip(*[(n, p) for n, p in model.named_parameters()
+                                        if p.requires_grad])
+        self.aux_interp = aux_interp
+        self.acc = AlignmentAccumulator(full=False)
+
+    def observe(self, criterion, loss_main, aux_dict, targets):
+        taps = {'s16': aux_dict['s16'], 's32': aux_dict['s32']}
+        loss_aux = {e: aux_loss(criterion, taps[e], targets, self.aux_interp) for e in EXITS}
+        m = compute_metrics(loss_main, loss_aux, taps, self.params, self.names,
+                            keep_flats=False)
+        self.acc.add(m)
+
+    def summary(self):
+        """Returns the epoch row and resets the accumulator."""
+        r = self.acc.row()
+        self.acc.reset()
+        return r
+
+    @staticmethod
+    def write_row(csv_path, epoch, row):
+        row = dict(row)
+        row['epoch'] = epoch
+        if not os.path.exists(csv_path):
+            with open(csv_path, 'w') as f:
+                f.write(','.join(CSV_COLS) + '\n')
+        with open(csv_path, 'a') as f:
+            f.write(','.join('%.6g' % row[c] if isinstance(row[c], float) else str(row[c])
+                             for c in CSV_COLS) + '\n')
+
+
+def batch_metrics(model, criterion, inputs, targets, params, names, aux_interp):
+    """Post-hoc path: one forward for both exits, then compute_metrics."""
+    out = model(inputs)
+    assert isinstance(out, tuple), 'model must be in train mode with aux=True'
+    h, aux = out
+    taps = {'s16': aux['s16'], 's32': aux['s32']}
+    loss_main = criterion(h, targets)
+    loss_aux = {e: aux_loss(criterion, taps[e], targets, aux_interp) for e in EXITS}
+    return compute_metrics(loss_main, loss_aux, taps, params, names)
 
 
 def run_checkpoint(model, loader, criterion, n_batches, device, dropout, aux_interp, seed):
@@ -245,70 +377,14 @@ def run_checkpoint(model, loader, criterion, n_batches, device, dropout, aux_int
         torch.cuda.manual_seed_all(seed)
 
     names, params = zip(*[(n, p) for n, p in model.named_parameters() if p.requires_grad])
-    scalars, skipped = [], 0
-    agg = {}          # CPU accumulators of summed gradients
-    prev_g_main = None
-    null_list = []
-
+    acc = AlignmentAccumulator(full=True)
     for ib, data in enumerate(loader):
         if ib >= n_batches:
             break
         inputs = data[0].to(device)
         targets = data[1].to(device).long()
-        m = batch_metrics(model, criterion, inputs, targets, params, names, aux_interp)
-        if m is None:
-            skipped += 1
-            continue
-        g_main = m.pop('_g_main').detach().to('cpu')
-        g_a16 = m.pop('_g_a16').detach().to('cpu')
-        g_a32 = m.pop('_g_a32').detach().to('cpu')
-        for k, v in (('g_main', g_main), ('g_a16', g_a16), ('g_a32', g_a32)):
-            agg[k] = v if k not in agg else agg[k] + v
-        if prev_g_main is not None and prev_g_main.numel() == g_main.numel():
-            null_list.append(cos(prev_g_main, g_main))
-        prev_g_main = g_main
-        scalars.append(m)
-
-    def col(key):
-        vals = [s[key] for s in scalars if key in s and np.isfinite(s[key])]
-        return np.array(vals) if vals else np.array([np.nan])
-
-    c16, c32 = col('cos16'), col('cos32')
-    paired = c16 - c32 if len(c16) == len(c32) else np.array([np.nan])
-    n = max(len(c16), 1)
-    row = {
-        'batches': len(scalars), 'skipped': skipped,
-        'cos16_mean': c16.mean(), 'cos16_std': c16.std(), 'cos16_sem': c16.std() / np.sqrt(n),
-        'cos32_mean': c32.mean(), 'cos32_std': c32.std(), 'cos32_sem': c32.std() / np.sqrt(n),
-        'frac_conflict16': float((c16 < 0).mean()), 'frac_conflict32': float((c32 < 0).mean()),
-        'paired_diff_mean': paired.mean(), 'paired_diff_sem': paired.std() / np.sqrt(n),
-        'proj16_mean': col('proj16').mean(), 'proj32_mean': col('proj32').mean(),
-        'ratio16_mean': col('ratio16').mean(), 'ratio32_mean': col('ratio32').mean(),
-        'phi16_mean': col('phi16').mean(), 'phi32_mean': col('phi32').mean(),
-        'cos_act16_mean': col('cos_act16').mean(), 'cos_act32_mean': col('cos_act32').mean(),
-        'cos_s16_s32_mean': col('cos_s16_s32').mean(),
-        'cos_agg16': cos(agg['g_main'], agg['g_a16']) if agg else float('nan'),
-        'cos_agg32': cos(agg['g_main'], agg['g_a32']) if agg else float('nan'),
-        'null_cos_mean': float(np.mean(null_list)) if null_list else float('nan'),
-        'loss_main_mean': col('loss_main').mean(),
-        'loss_aux16_mean': col('loss_aux16').mean(), 'loss_aux32_mean': col('loss_aux32').mean(),
-    }
-    for s in ('16', '32'):
-        for b in BLOCKS:
-            row['cos%s_%s' % (s, b)] = col('cos%s_%s' % (s, b)).mean()
-    return row
-
-
-CSV_COLS = (['epoch', 'batches', 'skipped',
-             'cos16_mean', 'cos16_std', 'cos16_sem', 'frac_conflict16',
-             'cos32_mean', 'cos32_std', 'cos32_sem', 'frac_conflict32',
-             'paired_diff_mean', 'paired_diff_sem',
-             'proj16_mean', 'proj32_mean', 'ratio16_mean', 'ratio32_mean',
-             'phi16_mean', 'phi32_mean',
-             'cos_act16_mean', 'cos_act32_mean', 'cos_s16_s32_mean',
-             'cos_agg16', 'cos_agg32', 'null_cos_mean',
-             'loss_main_mean', 'loss_aux16_mean', 'loss_aux32_mean']
-            + ['cos16_' + b for b in BLOCKS] + ['cos32_' + b for b in BLOCKS])
+        acc.add(batch_metrics(model, criterion, inputs, targets, params, names, aux_interp))
+    return acc.row()
 
 
 def selftest(device):
@@ -328,7 +404,7 @@ def selftest(device):
         m = batch_metrics(model, criterion, x, y, params, names, aux_interp=False)
         assert m is not None
         for k in ('cos16', 'cos32', 'cos_act16', 'cos_act32', 'cos_s16_s32',
-                  'proj16', 'proj32', 'ratio16', 'ratio32'):
+                  'proj16', 'proj32', 'ratio16', 'ratio32', 'phi16', 'phi32'):
             assert np.isfinite(m[k]), k
         assert 'cos32_score_feat4' not in m and 'cos32_upscore_5' not in m, \
             's32 must not receive gradient through decoder-only blocks'
@@ -344,6 +420,32 @@ def selftest(device):
     # aux_interp variant must also run
     m3 = batch_metrics(model, criterion, x, y, params, names, aux_interp=True)
     assert m3 is not None and np.isfinite(m3['cos16'])
+
+    # --- in-training logger: observe() must not break the training backward ---
+    logger = AlignmentLogger(model)
+    out = model(x)
+    assert isinstance(out, tuple)
+    h, aux_dict = out
+    loss_main = criterion(h, y)
+    loss = loss_main          # baseline: aux losses NOT added to the training loss
+    logger.observe(criterion, loss_main, aux_dict, y)
+    loss.backward()           # must succeed: observe() retains the graph
+    assert all(p.grad is not None for p in params), 'training backward must still populate grads'
+    model.zero_grad()
+    row = logger.summary()
+    assert row['batches'] == 1 and np.isfinite(row['cos16_mean'])
+    assert np.isnan(row['cos_agg16']) and np.isnan(row['null_cos_mean']), \
+        'training logger must run in light mode (no aggregates)'
+    import tempfile
+    tmp = os.path.join(tempfile.gettempdir(), 'ga_selftest.csv')
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    AlignmentLogger.write_row(tmp, 0, row)
+    AlignmentLogger.write_row(tmp, 1, row)
+    with open(tmp) as f:
+        lines = f.read().strip().split('\n')
+    assert len(lines) == 3 and lines[0].startswith('epoch,'), 'CSV must have header + 2 rows'
+    print('[selftest] logger OK')
     print('[selftest] OK')
 
 
