@@ -219,8 +219,11 @@ class VOC2011ClassSeg(VOCClassSegBase):
             root, year=2011, split=split, transform=transform)
         pkg_root = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
         imgsets_file = os.path.join(
-            pkg_root, 'ext/fcn.berkeleyvision.org',
-            'data/pascal/seg11valid.txt')
+            os.path.join(root, "VOC/VOCdevkit/VOC2011"),
+            'ImageSets',
+            'Segmentation',
+            'val.txt'
+        )
         dataset_dir = os.path.join(self.root, 'VOC/VOCdevkit/VOC2011')
         for did in open(imgsets_file):
             did = did.strip()

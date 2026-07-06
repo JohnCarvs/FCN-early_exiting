@@ -17,6 +17,12 @@ class ConfusionMatrix:
         preds = preds.detach().cpu().numpy().astype(np.int64)       # should we flatten this?
         targets = targets.detach().cpu().numpy().astype(np.int64)
 
+        print(
+        "target min/max:",
+        targets.min(),
+        targets.max()
+        )
+
         # for each coordinate in (targets, preds), sum '1'
         np.add.at(
             self.matrix,
@@ -36,7 +42,6 @@ class ConfusionMatrix:
         return(np.mean(acc_per_class))
 
     def iou_per_class(self):
-        # return TP/TP+FP+FN
         true_positives = np.diag(self.matrix)
 
         false_positives = np.sum(self.matrix, axis=0) - true_positives
@@ -45,14 +50,39 @@ class ConfusionMatrix:
         denom = true_positives + false_positives + false_negatives
 
         valid = denom > 0
-        
+
         iou_per_class = np.zeros(self.n_classes, dtype=float)
         
         iou_per_class[valid] = true_positives[valid] / denom[valid]
 
         return(iou_per_class)
-    
+
     def miou(self):
         # return TP/TP+FP+FN
-        
+
         return(np.mean(self.iou_per_class()))
+
+#    def miou_valid_classes(self):
+#        """
+#        MÉTRICA VOC/SBD
+#        média apenas das classes presentes
+#        """
+#        true_positives = np.diag(self.matrix)
+#
+#        false_positives = np.sum(self.matrix, axis=0) - true_positives
+#        false_negatives = np.sum(self.matrix, axis=1) - true_positives
+#
+#        denom = true_positives + false_positives + false_negatives
+#
+#        valid = denom > 0
+#
+#        ious = np.zeros(self.n_classes, dtype=np.float64)
+#        ious[valid] = true_positives[valid] / denom[valid]
+#
+#        return np.mean(ious[valid])
+
+    def pixel_acc_global(self):
+        """
+        Pixel Accuracy Global
+        """
+        return np.diag(self.matrix).sum() / self.matrix.sum()
