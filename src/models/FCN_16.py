@@ -5,6 +5,7 @@ File adapted from https://github.com/SJTUzhanglj/FCN
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def get_upsample_filter(size):
@@ -22,11 +23,14 @@ def get_upsample_filter(size):
 
 class FCN16s(nn.Module):
 
-    def __init__(self, n_class=21, aux=False, no_skip=False, aux_upsample=False):
+    def __init__(self, n_class=21, aux=False, no_skip=False, aux_upsample=False,
+                 return_all_exits=False, aux_interp=False):
         super(FCN16s, self).__init__()
         self.aux = aux
         self.no_skip = no_skip
         self.aux_upsample = aux_upsample
+        self.return_all_exits = return_all_exits
+        self.aux_interp = aux_interp
         if aux_upsample:
             self.aux_upscore_s32 = nn.ConvTranspose2d(n_class, n_class, 64, stride=32, bias=False)
         self.features_123 = nn.Sequential(
@@ -93,7 +97,7 @@ class FCN16s(nn.Module):
         self.upscore_5 = nn.ConvTranspose2d(n_class, n_class, 4, stride=2,
                                               bias=False)
 
-    def forward(self, x):
+    def forward(self, x, return_all_exits=None, upsample_aux=None, upsample_mode='bilinear'):
         feat3 = self.features_123(x)  #1/8
         feat4 = self.features_4(feat3)  #1/16
         feat5 = self.features_5(feat4)  #1/32
@@ -110,12 +114,38 @@ class FCN16s(nn.Module):
         h = self.upscore(score4)        # 1/1
         h = h[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
 
-        if not (self.aux and self.training):
+        should_return_aux = return_all_exits if return_all_exits is not None else (self.return_all_exits or (self.aux and self.training))
+        if not should_return_aux:
             return h
+
+        do_upsample = upsample_aux if upsample_aux is not None else self.aux_interp
+
         if self.aux_upsample:
             aux32 = self.aux_upscore_s32(score5)[:, :, 28:28+x.size()[2], 28:28+x.size()[3]].contiguous()
-            return h, {'s32': aux32}
-        return h, {'s32': score5}
+            aux_dict = {'s32': aux32}
+        elif do_upsample:
+            target_size = x.shape[-2:]
+            interp_kw = {'align_corners': False} if upsample_mode in ('bilinear', 'bicubic') else {}
+            aux_dict = {
+                's32': F.interpolate(score5, size=target_size, mode=upsample_mode, **interp_kw)
+            }
+        else:
+            aux_dict = {'s32': score5}
+
+        return h, aux_dict
+
+    def forward_all_exits(self, x, upsample=True, upsample_mode='bilinear'):
+        """Inference helper for Decision-Centered Teamwork.
+        
+        Returns a dict containing:
+            - 's32': stride-32 exit (bottleneck)
+            - 'main': final FCN output
+        All tensors have shape (B, C, H, W) when upsample=True.
+        """
+        h, aux = self.forward(x, return_all_exits=True, upsample_aux=upsample, upsample_mode=upsample_mode)
+        res = dict(aux)
+        res['main'] = h
+        return res
 
     def copy_params_from_vgg16(self, vgg16, copy_fc8=True, init_upscore=True):
         for l1, l2 in zip(vgg16.features, [self.features_123,self.features_4,self.features_5]):
