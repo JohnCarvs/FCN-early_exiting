@@ -69,6 +69,10 @@ def parse_args():
                         help='Computation device')
     parser.add_argument('--selftest', action='store_true', default=False,
                         help='Run self-test with dummy tensors and synthetic model')
+    parser.add_argument('--seed', type=int, default=0,
+                        help='Seed for the disjoint calibration/evaluation split of the val set')
+    parser.add_argument('--opts', nargs='*', default=[],
+                        help="ADP-C config overrides, e.g. --opts EXIT.TYPE flex EXIT.INTER_CHANNEL 128")
     return parser.parse_args()
 
 
@@ -244,6 +248,12 @@ class TeamworkSegmentationEngine:
 
         self.log_binned_likelihood_matrix = torch.from_numpy(np.log(norm_binned)).float().to(self.device)
 
+        # Weighted-voting weights = per-exit mIoU on the calibration split (no test leakage)
+        calib_mious = [calculate_miou_from_matrix(counts[j])[0] for j in range(self.num_exits)]
+        self.exit_weights = calib_mious
+        print("[Teamwork] Calibration mIoU per exit (used as voting weights): "
+              + ", ".join(f"exit{j + 1}={m * 100:.2f}%" for j, m in enumerate(calib_mious)))
+
     def save_likelihoods(self, filepath: str):
         """Saves estimated likelihood matrices to .npy or .pth file."""
         data = {
@@ -251,7 +261,8 @@ class TeamworkSegmentationEngine:
             'log_binned_likelihood': self.log_binned_likelihood_matrix.cpu().numpy(),
             'num_classes': self.num_classes,
             'num_exits': self.num_exits,
-            'conf_thresholds': self.conf_thresholds
+            'conf_thresholds': self.conf_thresholds,
+            'exit_weights': list(self.exit_weights)
         }
         np.save(filepath, data, allow_pickle=True)
         print(f"[Teamwork] Saved Bayes likelihood matrices to: {filepath}")
@@ -261,6 +272,8 @@ class TeamworkSegmentationEngine:
         data = np.load(filepath, allow_pickle=True).item()
         self.log_likelihood_matrix = torch.from_numpy(data['log_likelihood']).float().to(self.device)
         self.log_binned_likelihood_matrix = torch.from_numpy(data['log_binned_likelihood']).float().to(self.device)
+        if 'exit_weights' in data:
+            self.exit_weights = list(data['exit_weights'])
         print(f"[Teamwork] Loaded Bayes likelihood matrices from: {filepath}")
 
     def set_exit_weights(self, weights: List[float]):
@@ -545,22 +558,47 @@ def main():
         print("Tip: You can test the engine logic immediately using: python test_teamwork_adpc.py --selftest")
         sys.exit(1)
 
-    print(f"Loading configuration from: {args.cfg}")
-    update_config(config, args)
+    print(f"Loading configuration from: {args.cfg}  (overrides: {args.opts})")
+    # HRNet/ADP-C update_config reads args.cfg and args.opts
+    from types import SimpleNamespace
+    update_config(config, SimpleNamespace(cfg=args.cfg, opts=list(args.opts)))
 
     # Initialize model
     model = eval('models.' + config.MODEL.NAME + '.get_seg_model')(config)
-    if args.model_file:
-        print(f"Loading checkpoint: {args.model_file}")
-        state = torch.load(args.model_file, map_location='cpu')
-        if 'state_dict' in state:
-            state = state['state_dict']
-        model.load_state_dict(state, strict=False)
+    model_file = args.model_file or getattr(config.TEST, 'MODEL_FILE', '')
+    if not model_file:
+        print("[Error] No checkpoint given (--model_file). Without it the exits are untrained.")
+        sys.exit(1)
+
+    print(f"Loading checkpoint: {model_file}")
+    state = torch.load(model_file, map_location='cpu')
+    if isinstance(state, dict) and 'state_dict' in state:
+        state = state['state_dict']
+    model_dict = model.state_dict()
+    # Checkpoints are saved from the FullModel/DataParallel wrappers -> strip prefixes
+    cleaned = {}
+    for k, v in state.items():
+        for prefix in ('module.model.', 'model.', 'module.'):
+            if k.startswith(prefix) and k[len(prefix):] in model_dict:
+                k = k[len(prefix):]
+                break
+        if k in model_dict and model_dict[k].shape == v.shape:
+            cleaned[k] = v
+    match_ratio = len(cleaned) / max(1, len(model_dict))
+    print(f"[Checkpoint] Matched {len(cleaned)}/{len(model_dict)} model tensors ({match_ratio * 100:.1f}%).")
+    if match_ratio < 0.95:
+        missing = [k for k in model_dict if k not in cleaned][:10]
+        print(f"[Error] Checkpoint does not match the model config. First missing keys: {missing}")
+        print("Hint: EE+RH / ADP-C checkpoints need --opts EXIT.TYPE flex EXIT.INTER_CHANNEL 128 (w48).")
+        sys.exit(1)
+    model_dict.update(cleaned)
+    model.load_state_dict(model_dict)
 
     model = model.to(args.device)
     model.eval()
 
-    # Build Cityscapes val loader
+    # Build Cityscapes val dataset (HRNet convention: crop_size = (H, W))
+    test_size = (config.TEST.IMAGE_SIZE[1], config.TEST.IMAGE_SIZE[0])
     val_dataset = eval('datasets.' + config.DATASET.DATASET)(
         root=config.DATASET.ROOT,
         list_path=config.DATASET.TEST_SET,
@@ -570,37 +608,39 @@ def main():
         flip=False,
         ignore_label=config.TRAIN.IGNORE_LABEL,
         base_size=config.TEST.BASE_SIZE,
-        crop_size=config.TEST.IMAGE_SIZE,
+        crop_size=test_size,
         downsample_rate=1
     )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=4,
-        pin_memory=True
-    )
+
+    # Disjoint calibration / evaluation split (Bayes matrices and voting weights
+    # are estimated ONLY on the calibration images)
+    n_total = len(val_dataset)
+    perm = np.random.RandomState(args.seed).permutation(n_total)
+    n_calib = max(1, int(n_total * args.calib_ratio))
+    calib_idx, eval_idx = perm[:n_calib].tolist(), perm[n_calib:].tolist()
+    print(f"[Split] {n_total} val images -> {len(calib_idx)} calibration / {len(eval_idx)} evaluation (seed={args.seed})")
+
+    loader_kw = dict(batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    calib_loader = torch.utils.data.DataLoader(torch.utils.data.Subset(val_dataset, calib_idx), **loader_kw)
+    eval_loader = torch.utils.data.DataLoader(torch.utils.data.Subset(val_dataset, eval_idx), **loader_kw)
 
     engine = TeamworkSegmentationEngine(
         num_classes=args.num_classes,
         num_exits=4,
         device=args.device
     )
-    engine.set_exit_weights([0.446, 0.602, 0.766, 0.799])
 
-    # Fit or load Bayes matrices
+    # Fit or load Bayes matrices (cache is only valid for the same checkpoint + seed + calib_ratio)
     if args.bayes_matrix_file and os.path.exists(args.bayes_matrix_file):
         engine.load_likelihoods(args.bayes_matrix_file)
     else:
-        # Use first part of val_loader as calibration
-        calib_batches = max(1, int(len(val_loader) * args.calib_ratio))
-        engine.fit_likelihood_matrices(val_loader, model, max_batches=calib_batches)
+        engine.fit_likelihood_matrices(calib_loader, model)
         if args.bayes_matrix_file:
             engine.save_likelihoods(args.bayes_matrix_file)
 
-    # Run anytime evaluation
+    # Run anytime evaluation on the held-out images only
     csv_out = args.output_csv or 'results_teamwork_adpc.csv'
-    run_evaluation(val_loader, model, engine, output_csv=csv_out, max_samples=args.max_samples)
+    run_evaluation(eval_loader, model, engine, output_csv=csv_out, max_samples=args.max_samples)
 
 
 if __name__ == '__main__':
