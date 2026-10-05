@@ -480,13 +480,25 @@ class SyntheticADPCModel(nn.Module):
 
     def forward(self, x):
         B, _, H, W = x.shape
-        # Returns 4 exit logits with progressively decreasing noise
-        torch.manual_seed(42)
+        # True labels are embedded in the first channel of x for the self-test
+        true_labels = x[:, 0].clamp(0, self.num_classes - 1).long()
+        
+        # Base logits with correct class having a higher value (e.g., 5.0)
+        base_logits = torch.zeros(B, self.num_classes, H, W, device=x.device)
+        base_logits.scatter_(1, true_labels.unsqueeze(1), 5.0)
+        
+        # Shared noise simulating common backbone errors across all exits
+        shared_noise = torch.randn_like(base_logits) * 3.0
+        
         exits = []
         for i in range(4):
-            # Scale logits so deeper exits are more confident
-            logits = torch.randn(B, self.num_classes, H, W, device=x.device) * (1.0 + 0.5 * i)
-            exits.append(logits)
+            # Independent noise decreases with exit depth (simulating refinement)
+            noise_std = 6.0 - i * 1.0
+            independent_noise = torch.randn_like(base_logits) * noise_std
+            
+            # Combine base signal, shared noise, and exit-specific independent noise
+            exit_logits = base_logits + shared_noise + independent_noise
+            exits.append(exit_logits)
         return exits
 
 
@@ -504,14 +516,20 @@ def run_selftest():
 
     # Create synthetic dataset (5 calibration batches, 10 eval batches)
     H, W = 128, 256
-    calib_data = [
-        (torch.randn(2, 3, H, W), torch.randint(0, num_classes, (2, H, W)))
-        for _ in range(5)
-    ]
-    eval_data = [
-        (torch.randn(2, 3, H, W), torch.randint(0, num_classes, (2, H, W)))
-        for _ in range(10)
-    ]
+    
+    def make_dataset(batches, seed):
+        torch.manual_seed(seed)
+        data = []
+        for _ in range(batches):
+            labels = torch.randint(0, num_classes, (2, H, W))
+            images = torch.randn(2, 3, H, W)
+            # Embed labels into the first channel so the mock model can read them
+            images[:, 0, :, :] = labels.float()
+            data.append((images, labels))
+        return data
+
+    calib_data = make_dataset(5, seed=100)
+    eval_data = make_dataset(10, seed=200)
 
     engine = TeamworkSegmentationEngine(num_classes=num_classes, num_exits=4, device=device)
     engine.set_exit_weights([0.446, 0.602, 0.766, 0.799])
