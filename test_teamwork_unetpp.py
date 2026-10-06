@@ -106,6 +106,8 @@ def parse_args():
     # Teamwork
     p.add_argument('--calib_ratio', type=float, default=0.3)
     p.add_argument('--bayes_matrix_file', type=str, default=None)
+    p.add_argument('--uncertainty_thresh', type=float, default=0.85,
+                   help='Confidence threshold for uncertainty-gated teamwork (default: 0.85)')
     p.add_argument('--output_csv', type=str, default=None)
     p.add_argument('--max_samples', type=int, default=None)
     p.add_argument('--eval_batch_size', type=int, default=4)
@@ -474,10 +476,12 @@ class TeamworkSegmentationEngine:
 
     def __init__(self, num_classes: int = 2, num_exits: int = 4,
                  conf_thresholds: Tuple[float, float] = (0.70, 0.90),
+                 uncertainty_threshold: float = 0.85,
                  laplace_eps: float = 1.0, device: str = 'cpu'):
         self.num_classes = num_classes
         self.num_exits = num_exits
         self.conf_thresholds = conf_thresholds
+        self.uncertainty_threshold = uncertainty_threshold
         self.laplace_eps = laplace_eps
         self.device = device
         self.log_likelihood_matrix: Optional[torch.Tensor] = None
@@ -603,6 +607,62 @@ class TeamworkSegmentationEngine:
             bn[(conf >= lo) & (conf < hi)] = 1
             post = post + self.log_binned_likelihood_matrix[j, bn, pred]
         return post.argmax(dim=-1)
+
+    def predict_uncertainty_gated_voting(self, logits, stage, threshold=None, weights=None):
+        """Hard gating: Exit `stage` decides if its confidence >= threshold;
+        otherwise defers to performance-weighted team voting across exits 0..stage.
+        """
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+        th = threshold if threshold is not None else self.uncertainty_threshold
+        prob_curr = F.softmax(logits[stage], dim=1)
+        conf_curr, pred_curr = prob_curr.max(dim=1)
+
+        # Team prediction: weighted logit voting
+        combined = torch.zeros_like(logits[0])
+        for j in range(stage + 1):
+            w = weights[j] if weights else 1.0
+            combined = combined + w * logits[j]
+        pred_team = combined.argmax(dim=1)
+
+        return torch.where(conf_curr >= th, pred_curr, pred_team)
+
+    def predict_uncertainty_gated_bayes(self, logits, stage, threshold=None):
+        """Hard gating: Exit `stage` decides if its confidence >= threshold;
+        otherwise defers to Bayesian updating across exits 0..stage.
+        """
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+        th = threshold if threshold is not None else self.uncertainty_threshold
+        prob_curr = F.softmax(logits[stage], dim=1)
+        conf_curr, pred_curr = prob_curr.max(dim=1)
+
+        pred_bayes = self.predict_bayesian(logits, stage)
+        return torch.where(conf_curr >= th, pred_curr, pred_bayes)
+
+    def predict_entropy_gated_voting(self, logits, stage, weights=None):
+        """Soft gating: Blend Exit `stage` logits with team voting logits
+        proportional to normalized Shannon entropy u = H(p) / log(C) in [0, 1].
+        High confidence (u -> 0) -> Exit `stage` decides.
+        High uncertainty (u -> 1) -> Team consensus decides.
+        """
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+        prob_curr = F.softmax(logits[stage], dim=1)
+        eps = 1e-12
+        entropy = -torch.sum(prob_curr * torch.log(prob_curr + eps), dim=1, keepdim=True)
+        max_ent = np.log(self.num_classes) if self.num_classes > 1 else 1.0
+        u = (entropy / max_ent).clamp(0.0, 1.0)
+
+        # Normalized weighted team logits
+        combined = torch.zeros_like(logits[0])
+        tot_w = sum(weights[:stage+1]) if weights else float(stage + 1)
+        for j in range(stage + 1):
+            w = (weights[j] if weights else 1.0) / max(tot_w, 1e-8)
+            combined = combined + w * logits[j]
+
+        blended = (1.0 - u) * logits[stage] + u * combined
+        return blended.argmax(dim=1)
 
 
 # ==============================================================================
@@ -767,6 +827,9 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
         'Logit Voting (Weighted)',
         'Bayesian Updating',
         'Bayes + Conformal Bins',
+        'Uncertainty-Gated Voting',
+        'Uncertainty-Gated Bayes',
+        'Entropy-Gated (Soft)',
     ]
     matrices = {m: [np.zeros((nc, nc), dtype=np.int64) for _ in range(ne)]
                 for m in methods}
@@ -808,6 +871,15 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
 
                 p_cp = engine.predict_conformal_bayesian(aligned, s).cpu().numpy()
                 matrices['Bayes + Conformal Bins'][s] += compute_confusion_matrix(p_cp, tgt_np, nc)
+
+                p_ug_v = engine.predict_uncertainty_gated_voting(aligned, s, weights=engine.exit_weights).cpu().numpy()
+                matrices['Uncertainty-Gated Voting'][s] += compute_confusion_matrix(p_ug_v, tgt_np, nc)
+
+                p_ug_b = engine.predict_uncertainty_gated_bayes(aligned, s).cpu().numpy()
+                matrices['Uncertainty-Gated Bayes'][s] += compute_confusion_matrix(p_ug_b, tgt_np, nc)
+
+                p_eg = engine.predict_entropy_gated_voting(aligned, s, weights=engine.exit_weights).cpu().numpy()
+                matrices['Entropy-Gated (Soft)'][s] += compute_confusion_matrix(p_eg, tgt_np, nc)
 
             evaluated += imgs.size(0)
             if (bi + 1) % 10 == 0 or evaluated == max_samples:
@@ -1021,8 +1093,10 @@ def main():
                num_workers=args.num_workers, pin_memory=True)
     cal_loader = DataLoader(Subset(val_ds, cal_idx), **lkw)
     eval_loader = DataLoader(Subset(val_ds, eval_idx), **lkw)
-
-    engine = TeamworkSegmentationEngine(num_classes=nc, num_exits=4, device=device)
+    engine = TeamworkSegmentationEngine(
+        num_classes=nc, num_exits=4,
+        uncertainty_threshold=args.uncertainty_thresh,
+        device=device)
 
     if args.bayes_matrix_file and os.path.exists(args.bayes_matrix_file):
         engine.load_likelihoods(args.bayes_matrix_file)
