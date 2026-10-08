@@ -41,6 +41,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 import matplotlib.pyplot as plt
+from PIL import Image
 
 # ==============================================================================
 # Constants
@@ -208,10 +209,8 @@ class KvasirSEGDataset(Dataset):
 
     def __init__(self, data_root: str, indices: Optional[List[int]] = None,
                  img_size: int = 256, augment: bool = False):
-        import PIL.Image
         self.img_size = img_size
         self.augment = augment
-        self._PIL = PIL.Image
 
         img_dir = os.path.join(data_root, 'images')
         mask_dir = os.path.join(data_root, 'masks')
@@ -228,14 +227,13 @@ class KvasirSEGDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        PIL = self._PIL
-        img = PIL.Image.open(self.image_paths[idx]).convert('RGB')
-        mask = PIL.Image.open(self.mask_paths[idx]).convert('L')
+        img = Image.open(self.image_paths[idx]).convert('RGB')
+        mask = Image.open(self.mask_paths[idx]).convert('L')
 
         # Resize
         sz = (self.img_size, self.img_size)
-        img = img.resize(sz, PIL.Image.BILINEAR)
-        mask = mask.resize(sz, PIL.Image.NEAREST)
+        img = img.resize(sz, Image.BILINEAR)
+        mask = mask.resize(sz, Image.NEAREST)
 
         img = np.array(img, dtype=np.float32) / 255.0
         mask = (np.array(mask, dtype=np.float32) > 127.5).astype(np.int64)  # binary
@@ -268,8 +266,6 @@ class CityscapesDataset(Dataset):
     def __init__(self, data_root: str, split: str = 'val',
                  img_size: Optional[int] = None, augment: bool = False):
         import glob as _glob
-        import PIL.Image
-        self._PIL = PIL.Image
         self.img_size = img_size
         self.augment = augment
 
@@ -291,13 +287,12 @@ class CityscapesDataset(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx):
-        PIL = self._PIL
-        img = PIL.Image.open(self.images[idx]).convert('RGB')
-        lbl = PIL.Image.open(self.labels[idx])
+        img = Image.open(self.images[idx]).convert('RGB')
+        lbl = Image.open(self.labels[idx])
 
         if self.img_size:
-            img = img.resize((self.img_size, self.img_size), PIL.Image.BILINEAR)
-            lbl = lbl.resize((self.img_size, self.img_size), PIL.Image.NEAREST)
+            img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
+            lbl = lbl.resize((self.img_size, self.img_size), Image.NEAREST)
 
         img = np.array(img, dtype=np.float32) / 255.0
         lbl = np.array(lbl, dtype=np.uint8)
