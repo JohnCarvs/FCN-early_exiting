@@ -1157,14 +1157,17 @@ def main():
     ckpt = torch.load(args.model_file, map_location='cpu')
     if isinstance(ckpt, dict) and 'state_dict' in ckpt:
         encoder = ckpt.get('encoder', args.encoder)
-        nc = ckpt.get('num_classes', args.num_classes)
+        nc = ckpt.get('num_classes', KVASIR_NUM_CLASSES if args.dataset == 'kvasir' else CITYSCAPES_NUM_CLASSES)
         dataset = ckpt.get('dataset', args.dataset)
         img_size = ckpt.get('img_size', args.img_size)
         sd = ckpt['state_dict']
         print(f"  Checkpoint info: encoder={encoder}, classes={nc}, "
               f"dataset={dataset}, img_size={img_size}")
     else:
-        encoder, nc, dataset, img_size = args.encoder, args.num_classes, args.dataset, args.img_size
+        encoder = args.encoder
+        nc = KVASIR_NUM_CLASSES if args.dataset == 'kvasir' else CITYSCAPES_NUM_CLASSES
+        dataset = args.dataset
+        img_size = args.img_size
         sd = ckpt
 
     model = UNetPlusPlus(num_classes=nc, encoder=encoder, pretrained_encoder=False)
@@ -1208,8 +1211,8 @@ def main():
     n = len(val_ds)
     perm2 = np.random.RandomState(args.seed + 1).permutation(n)
     n_cal = max(1, int(n * args.calib_ratio))
-    cal_idx = perm2[:n_cal].tolist()
-    eval_idx = perm2[n_cal:].tolist()
+    cal_idx = [int(x) for x in perm2[:n_cal]]
+    eval_idx = [int(x) for x in perm2[n_cal:]]
     print(f"[Split] {n} val images -> {len(cal_idx)} calib / {len(eval_idx)} eval")
 
     lkw = dict(batch_size=args.eval_batch_size, shuffle=False,
