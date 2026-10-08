@@ -799,7 +799,10 @@ def train_unetpp(args):
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
             outputs = model(images)
-            loss = sum(w * criterion(o, labels) for w, o in zip(ds_w, outputs))
+            losses = [w * criterion(o, labels) for w, o in zip(ds_w, outputs)]
+            loss = losses[0]
+            for l_ in losses[1:]:
+                loss = loss + l_
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
