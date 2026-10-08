@@ -40,6 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
+import matplotlib.pyplot as plt
 
 # ==============================================================================
 # Constants
@@ -111,6 +112,10 @@ def parse_args():
     p.add_argument('--output_csv', type=str, default=None)
     p.add_argument('--max_samples', type=int, default=None)
     p.add_argument('--eval_batch_size', type=int, default=4)
+    p.add_argument('--save_images_dir', type=str, default=None,
+                   help='Directory to save comparison images during evaluation')
+    p.add_argument('--num_images_to_save', type=int, default=5,
+                   help='Number of images to save if --save_images_dir is set')
 
     # General
     p.add_argument('--device', type=str,
@@ -611,6 +616,7 @@ class TeamworkSegmentationEngine:
     def predict_uncertainty_gated_voting(self, logits, stage, threshold=None, weights=None):
         """Hard gating: Exit `stage` decides if its confidence >= threshold;
         otherwise defers to performance-weighted team voting across exits 0..stage.
+        (This is the traditional "Classification-style" gating).
         """
         if stage == 0:
             return logits[0].argmax(dim=1)
@@ -639,6 +645,41 @@ class TeamworkSegmentationEngine:
 
         pred_bayes = self.predict_bayesian(logits, stage)
         return torch.where(conf_curr >= th, pred_curr, pred_bayes)
+        
+    def predict_resolution_aware_voting(self, logits, stage, threshold=None, weights=None):
+        """Resolution-Aware Gating (Reverse Gating for Segmentation): 
+        If confidence < threshold (border region / high uncertainty), rely ONLY on Exit `stage`
+        because early exits have poor spatial resolution.
+        If confidence >= threshold (central region / low uncertainty), use Teamwork to filter noise.
+        """
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+        th = threshold if threshold is not None else self.uncertainty_threshold
+        prob_curr = F.softmax(logits[stage], dim=1)
+        conf_curr, pred_curr = prob_curr.max(dim=1)
+
+        # Team prediction: weighted logit voting
+        combined = torch.zeros_like(logits[0])
+        for j in range(stage + 1):
+            w = weights[j] if weights else 1.0
+            combined = combined + w * logits[j]
+        pred_team = combined.argmax(dim=1)
+
+        # Reverse logic: high confidence -> Teamwork; low confidence -> Exit `stage` alone
+        return torch.where(conf_curr >= th, pred_team, pred_curr)
+
+    def predict_resolution_aware_bayes(self, logits, stage, threshold=None):
+        """Resolution-Aware Gating with Bayesian Updating."""
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+        th = threshold if threshold is not None else self.uncertainty_threshold
+        prob_curr = F.softmax(logits[stage], dim=1)
+        conf_curr, pred_curr = prob_curr.max(dim=1)
+
+        pred_bayes = self.predict_bayesian(logits, stage)
+        
+        # Reverse logic: high confidence -> Teamwork; low confidence -> Exit `stage` alone
+        return torch.where(conf_curr >= th, pred_bayes, pred_curr)
 
     def predict_entropy_gated_voting(self, logits, stage, weights=None):
         """Soft gating: Blend Exit `stage` logits with team voting logits
@@ -662,6 +703,31 @@ class TeamworkSegmentationEngine:
             combined = combined + w * logits[j]
 
         blended = (1.0 - u) * logits[stage] + u * combined
+        return blended.argmax(dim=1)
+        
+    def predict_resolution_aware_soft(self, logits, stage, weights=None):
+        """Resolution-Aware Soft Gating:
+        High confidence (u -> 0) -> Team consensus decides.
+        High uncertainty (u -> 1) -> Exit `stage` decides.
+        """
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+        prob_curr = F.softmax(logits[stage], dim=1)
+        eps = 1e-12
+        entropy = -torch.sum(prob_curr * torch.log(prob_curr + eps), dim=1, keepdim=True)
+        max_ent = np.log(self.num_classes) if self.num_classes > 1 else 1.0
+        u = (entropy / max_ent).clamp(0.0, 1.0)
+
+        # Normalized weighted team logits
+        combined = torch.zeros_like(logits[0])
+        tot_w = sum(weights[:stage+1]) if weights else float(stage + 1)
+        for j in range(stage + 1):
+            w = (weights[j] if weights else 1.0) / max(tot_w, 1e-8)
+            combined = combined + w * logits[j]
+
+        # Reverse soft logic: u is entropy. When u is high (border), weight on Exit `stage` is high.
+        # When u is low (center), weight on Team is high.
+        blended = u * logits[stage] + (1.0 - u) * combined
         return blended.argmax(dim=1)
 
 
@@ -812,7 +878,9 @@ def train_unetpp(args):
 def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
                    output_csv: Optional[str] = None,
                    max_samples: Optional[int] = None,
-                   class_names: Optional[List[str]] = None):
+                   class_names: Optional[List[str]] = None,
+                   save_images_dir: Optional[str] = None,
+                   num_images_to_save: int = 5):
     print("\n" + "=" * 90)
     print("STARTING DECISION-CENTERED TEAMWORK EVALUATION (UNet++ 4 EXITS)")
     print("=" * 90)
@@ -830,6 +898,9 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
         'Uncertainty-Gated Voting',
         'Uncertainty-Gated Bayes',
         'Entropy-Gated (Soft)',
+        'Resolution-Aware Voting',
+        'Resolution-Aware Bayes',
+        'Resolution-Aware Soft'
     ]
     matrices = {m: [np.zeros((nc, nc), dtype=np.int64) for _ in range(ne)]
                 for m in methods}
@@ -881,8 +952,63 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
                 p_eg = engine.predict_entropy_gated_voting(aligned, s, weights=engine.exit_weights).cpu().numpy()
                 matrices['Entropy-Gated (Soft)'][s] += compute_confusion_matrix(p_eg, tgt_np, nc)
 
+                p_ra_v = engine.predict_resolution_aware_voting(aligned, s, weights=engine.exit_weights).cpu().numpy()
+                matrices['Resolution-Aware Voting'][s] += compute_confusion_matrix(p_ra_v, tgt_np, nc)
+
+                p_ra_b = engine.predict_resolution_aware_bayes(aligned, s).cpu().numpy()
+                matrices['Resolution-Aware Bayes'][s] += compute_confusion_matrix(p_ra_b, tgt_np, nc)
+
+                p_ra_s = engine.predict_resolution_aware_soft(aligned, s, weights=engine.exit_weights).cpu().numpy()
+                matrices['Resolution-Aware Soft'][s] += compute_confusion_matrix(p_ra_s, tgt_np, nc)
+
+            if save_images_dir and evaluated < num_images_to_save:
+                os.makedirs(save_images_dir, exist_ok=True)
+                for i in range(min(imgs.size(0), num_images_to_save - evaluated)):
+                    fig, axes = plt.subplots(1, 6, figsize=(24, 4))
+                    
+                    # Original Image
+                    img_np = imgs[i].cpu().numpy().transpose(1, 2, 0)
+                    img_np = img_np * IMAGENET_STD + IMAGENET_MEAN
+                    img_np = np.clip(img_np, 0, 1)
+                    axes[0].imshow(img_np)
+                    axes[0].set_title('Image')
+                    axes[0].axis('off')
+                    
+                    # Ground Truth
+                    axes[1].imshow(tgt_np[i], cmap='jet', vmin=0, vmax=nc-1)
+                    axes[1].set_title('Ground Truth')
+                    axes[1].axis('off')
+                    
+                    # Baseline Exit 4
+                    p_b_4 = engine.predict_baseline(aligned, ne - 1)[i].cpu().numpy()
+                    axes[2].imshow(p_b_4, cmap='jet', vmin=0, vmax=nc-1)
+                    axes[2].set_title('Baseline (Exit 4)')
+                    axes[2].axis('off')
+
+                    # Traditional Logit Voting
+                    p_trad_4 = engine.predict_logit_voting(aligned, ne - 1, engine.exit_weights)[i].cpu().numpy()
+                    axes[3].imshow(p_trad_4, cmap='jet', vmin=0, vmax=nc-1)
+                    axes[3].set_title('Trad. Teamwork')
+                    axes[3].axis('off')
+
+                    # Uncertainty-Gated (OLD Idea: Teamwork on Borders)
+                    p_ug_4 = engine.predict_uncertainty_gated_voting(aligned, ne - 1, weights=engine.exit_weights)[i].cpu().numpy()
+                    axes[4].imshow(p_ug_4, cmap='jet', vmin=0, vmax=nc-1)
+                    axes[4].set_title('Uncertainty-Gated (Old)')
+                    axes[4].axis('off')
+                    
+                    # Resolution-Aware Voting Exit 4 (NEW Idea: Exit 4 on Borders)
+                    p_ra_4 = engine.predict_resolution_aware_voting(aligned, ne - 1, weights=engine.exit_weights)[i].cpu().numpy()
+                    axes[5].imshow(p_ra_4, cmap='jet', vmin=0, vmax=nc-1)
+                    axes[5].set_title('Resolution-Aware (New)')
+                    axes[5].axis('off')
+                    
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(save_images_dir, f'comparison_{evaluated + i}.png'))
+                    plt.close()
+
             evaluated += imgs.size(0)
-            if (bi + 1) % 10 == 0 or evaluated == max_samples:
+            if (bi + 1) % 10 == 0 or (max_samples and evaluated >= max_samples):
                 print(f"  Processed {evaluated} samples ({time.time()-t0:.1f}s)...")
 
     # Print results
@@ -1108,7 +1234,9 @@ def main():
     csv_out = args.output_csv or f'results_teamwork_unetpp_{dataset}.csv'
     run_evaluation(eval_loader, model, engine,
                    output_csv=csv_out, max_samples=args.max_samples,
-                   class_names=class_names)
+                   class_names=class_names,
+                   save_images_dir=args.save_images_dir,
+                   num_images_to_save=args.num_images_to_save)
 
 
 if __name__ == '__main__':
