@@ -232,8 +232,8 @@ class KvasirSEGDataset(Dataset):
 
         # Resize
         sz = (self.img_size, self.img_size)
-        img = img.resize(sz, Image.BILINEAR)
-        mask = mask.resize(sz, Image.NEAREST)
+        img = img.resize(sz, Image.Resampling.BILINEAR)
+        mask = mask.resize(sz, Image.Resampling.NEAREST)
 
         img = np.array(img, dtype=np.float32) / 255.0
         mask = (np.array(mask, dtype=np.float32) > 127.5).astype(np.int64)  # binary
@@ -291,8 +291,8 @@ class CityscapesDataset(Dataset):
         lbl = Image.open(self.labels[idx])
 
         if self.img_size:
-            img = img.resize((self.img_size, self.img_size), Image.BILINEAR)
-            lbl = lbl.resize((self.img_size, self.img_size), Image.NEAREST)
+            img = img.resize((self.img_size, self.img_size), Image.Resampling.BILINEAR)
+            lbl = lbl.resize((self.img_size, self.img_size), Image.Resampling.NEAREST)
 
         img = np.array(img, dtype=np.float32) / 255.0
         lbl = np.array(lbl, dtype=np.uint8)
@@ -561,18 +561,18 @@ class TeamworkSegmentationEngine:
               ", ".join(f"exit{j+1}={m*100:.2f}%" for j,m in enumerate(mious)))
 
     def save_likelihoods(self, path):
-        np.save(path, {
-            'log_l': self.log_likelihood_matrix.cpu().numpy(),
-            'log_bl': self.log_binned_likelihood_matrix.cpu().numpy(),
+        torch.save({
+            'log_l': self.log_likelihood_matrix.cpu(),
+            'log_bl': self.log_binned_likelihood_matrix.cpu(),
             'nc': self.num_classes, 'ne': self.num_exits,
             'ct': self.conf_thresholds, 'ew': list(self.exit_weights)
-        }, allow_pickle=True)
+        }, path)
         print(f"[Teamwork] Saved matrices to {path}")
 
     def load_likelihoods(self, path):
-        d = np.load(path, allow_pickle=True).item()
-        self.log_likelihood_matrix = torch.from_numpy(d['log_l']).float().to(self.device)
-        self.log_binned_likelihood_matrix = torch.from_numpy(d['log_bl']).float().to(self.device)
+        d = torch.load(path, map_location=self.device)
+        self.log_likelihood_matrix = d['log_l'].float().to(self.device)
+        self.log_binned_likelihood_matrix = d['log_bl'].float().to(self.device)
         if 'ew' in d:
             self.exit_weights = list(d['ew'])
         print(f"[Teamwork] Loaded matrices from {path}")
