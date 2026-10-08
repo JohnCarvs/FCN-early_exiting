@@ -753,8 +753,8 @@ def train_unetpp(args):
         rng = np.random.RandomState(args.seed)
         perm = rng.permutation(n_total)
         n_train = int(0.8 * n_total)
-        train_idx = perm[:n_train].tolist()
-        val_idx = perm[n_train:].tolist()
+        train_idx = [int(x) for x in perm[:n_train]]
+        val_idx = [int(x) for x in perm[n_train:]]
 
         train_ds = KvasirSEGDataset(data_root, indices=train_idx,
                                     img_size=args.img_size, augment=True)
@@ -1196,7 +1196,7 @@ def main():
                      if f.endswith('.jpg')])
         rng = np.random.RandomState(args.seed)
         perm = rng.permutation(n_all)
-        val_idx = perm[int(0.8*n_all):].tolist()
+        val_idx = [int(x) for x in perm[int(0.8*n_all):]]
         val_ds = KvasirSEGDataset(data_root, indices=val_idx,
                                   img_size=img_size, augment=False)
         class_names = KVASIR_CLASS_NAMES
