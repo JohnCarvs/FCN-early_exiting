@@ -561,6 +561,8 @@ class TeamworkSegmentationEngine:
               ", ".join(f"exit{j+1}={m*100:.2f}%" for j,m in enumerate(mious)))
 
     def save_likelihoods(self, path):
+        assert self.log_likelihood_matrix is not None
+        assert self.log_binned_likelihood_matrix is not None
         torch.save({
             'log_l': self.log_likelihood_matrix.cpu(),
             'log_bl': self.log_binned_likelihood_matrix.cpu(),
