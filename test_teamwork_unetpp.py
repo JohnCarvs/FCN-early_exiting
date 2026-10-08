@@ -588,6 +588,7 @@ class TeamworkSegmentationEngine:
         return combined.argmax(dim=1)
 
     def predict_bayesian(self, logits, stage):
+        assert self.log_likelihood_matrix is not None
         B, C, H, W = logits[0].shape
         post = torch.zeros((B, H, W, self.num_classes), device=self.device)
         for j in range(stage + 1):
@@ -596,6 +597,7 @@ class TeamworkSegmentationEngine:
         return post.argmax(dim=-1)
 
     def predict_conformal_bayesian(self, logits, stage):
+        assert self.log_binned_likelihood_matrix is not None
         B, C, H, W = logits[0].shape
         post = torch.zeros((B, H, W, self.num_classes), device=self.device)
         lo, hi = self.conf_thresholds
