@@ -486,6 +486,7 @@ class TeamworkSegmentationEngine:
         self.device = device
         self.log_likelihood_matrix: Optional[torch.Tensor] = None
         self.log_binned_likelihood_matrix: Optional[torch.Tensor] = None
+        self.log_boundary_likelihood_matrix: Optional[torch.Tensor] = None
         self.exit_weights: List[float] = [1.0] * num_exits
 
     def fit_likelihood_matrices(self, calib_loader, model,
@@ -496,6 +497,7 @@ class TeamworkSegmentationEngine:
 
         counts = np.zeros((self.num_exits, C, C), dtype=np.int64)
         binned = np.zeros((self.num_exits, 3, C, C), dtype=np.int64)
+        binned_boundary = np.zeros((self.num_exits, 3, C, C), dtype=np.int64)
         t0 = time.time()
         n = 0
 
@@ -510,6 +512,23 @@ class TeamworkSegmentationEngine:
                 outs = model(imgs)
                 if not isinstance(outs, (list, tuple)):
                     outs = [outs]
+
+                # Calculate GT boundary distance bins ONCE per batch
+                mask_float = tgts.unsqueeze(1).float()
+                max5 = F.max_pool2d(mask_float, kernel_size=5, stride=1, padding=2)
+                min5 = -F.max_pool2d(-mask_float, kernel_size=5, stride=1, padding=2)
+                band0 = (max5 != min5).squeeze(1)
+                
+                max17 = F.max_pool2d(mask_float, kernel_size=17, stride=1, padding=8)
+                min17 = -F.max_pool2d(-mask_float, kernel_size=17, stride=1, padding=8)
+                band_less_8 = (max17 != min17).squeeze(1)
+                band1 = band_less_8 & (~band0)
+                
+                dist_bins = torch.zeros_like(tgts, dtype=torch.long)
+                dist_bins[band0] = 0
+                dist_bins[band1] = 1
+                dist_bins[~(band0 | band1)] = 2
+                dist_bins_np = dist_bins.cpu().numpy()
 
                 for j in range(min(len(outs), self.num_exits)):
                     o = outs[j]
@@ -535,6 +554,13 @@ class TeamworkSegmentationEngine:
                         if m.any():
                             binned[j,b] += np.bincount(
                                 C*pv[m]+tv[m], minlength=C*C).reshape(C,C)
+
+                    db_np = dist_bins_np[v]
+                    for b in range(3):
+                        m = db_np == b
+                        if m.any():
+                            binned_boundary[j,b] += np.bincount(
+                                C*pv[m]+tv[m], minlength=C*C).reshape(C,C)
                 n += 1
                 if n % 10 == 0:
                     print(f"  Calibrated {n} batches ({time.time()-t0:.1f}s)...")
@@ -554,6 +580,13 @@ class TeamworkSegmentationEngine:
                 d = binned[j,b].sum(0, keepdims=True) + C * eps
                 norm_b[j,b] = (binned[j,b] + eps) / np.maximum(d, 1e-12)
         self.log_binned_likelihood_matrix = torch.from_numpy(np.log(norm_b)).float().to(self.device)
+
+        norm_bb = np.zeros_like(binned_boundary, dtype=np.float64)
+        for j in range(self.num_exits):
+            for b in range(3):
+                d = binned_boundary[j,b].sum(0, keepdims=True) + C * eps
+                norm_bb[j,b] = (binned_boundary[j,b] + eps) / np.maximum(d, 1e-12)
+        self.log_boundary_likelihood_matrix = torch.from_numpy(np.log(norm_bb)).float().to(self.device)
 
         mious = [calculate_miou_from_matrix(counts[j])[0] for j in range(self.num_exits)]
         self.exit_weights = mious
@@ -610,6 +643,43 @@ class TeamworkSegmentationEngine:
             bn[conf >= hi] = 2
             bn[(conf >= lo) & (conf < hi)] = 1
             post = post + self.log_binned_likelihood_matrix[j, bn, pred]
+        return post.argmax(dim=-1)
+
+    def predict_boundary_aware_bayes(self, logits, stage):
+        """Boundary-Aware Bayesian Updating (Spatial Prior):
+        Estimates the distance to the boundary using the final exit's prediction.
+        Applies a different likelihood matrix depending on whether the pixel is 
+        near the edge, mid-distance, or deep inside the region.
+        """
+        assert self.log_boundary_likelihood_matrix is not None
+        if stage == 0:
+            return logits[0].argmax(dim=1)
+            
+        B, C, H, W = logits[0].shape
+        
+        # Estimate boundaries from the BEST available exit (Exit stage)
+        pred_final = logits[stage].argmax(dim=1)
+        mask_float = pred_final.unsqueeze(1).float()
+        
+        max5 = F.max_pool2d(mask_float, kernel_size=5, stride=1, padding=2)
+        min5 = -F.max_pool2d(-mask_float, kernel_size=5, stride=1, padding=2)
+        band0 = (max5 != min5).squeeze(1)
+        
+        max17 = F.max_pool2d(mask_float, kernel_size=17, stride=1, padding=8)
+        min17 = -F.max_pool2d(-mask_float, kernel_size=17, stride=1, padding=8)
+        band_less_8 = (max17 != min17).squeeze(1)
+        band1 = band_less_8 & (~band0)
+        
+        dist_bins = torch.zeros_like(pred_final, dtype=torch.long)
+        dist_bins[band0] = 0
+        dist_bins[band1] = 1
+        dist_bins[~(band0 | band1)] = 2
+        
+        post = torch.zeros((B, H, W, self.num_classes), device=self.device)
+        for j in range(stage + 1):
+            pred_j = logits[j].argmax(dim=1)
+            post = post + self.log_boundary_likelihood_matrix[j, dist_bins, pred_j]
+            
         return post.argmax(dim=-1)
 
     def predict_uncertainty_gated_voting(self, logits, stage, threshold=None, weights=None):
@@ -921,7 +991,8 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
         'Resolution-Aware Voting',
         'Resolution-Aware Bayes',
         'Resolution-Aware Soft',
-        'Consensus Veto'
+        'Consensus Veto',
+        'Boundary-Aware Bayes'
     ]
     matrices = {m: [np.zeros((nc, nc), dtype=np.int64) for _ in range(ne)]
                 for m in methods}
@@ -984,6 +1055,9 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
 
                 p_cv = engine.predict_consensus_veto(aligned, s).cpu().numpy()
                 matrices['Consensus Veto'][s] += compute_confusion_matrix(p_cv, tgt_np, nc)
+
+                p_bab = engine.predict_boundary_aware_bayes(aligned, s).cpu().numpy()
+                matrices['Boundary-Aware Bayes'][s] += compute_confusion_matrix(p_bab, tgt_np, nc)
 
             if save_images_dir and evaluated < num_images_to_save:
                 os.makedirs(save_images_dir, exist_ok=True)
