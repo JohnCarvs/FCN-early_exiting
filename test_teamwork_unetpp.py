@@ -729,6 +729,24 @@ class TeamworkSegmentationEngine:
         blended = u * logits[stage] + (1.0 - u) * combined
         return blended.argmax(dim=1)
 
+    def predict_consensus_veto(self, logits, stage):
+        """Consensus Veto:
+        Exit `stage` dictates the prediction.
+        However, if ALL previous exits (0 to stage-1) unanimously predict Background (0), 
+        and Exit `stage` predicts Polyp (1), the previous exits veto and force the prediction to 0.
+        This protects the baseline while removing high-resolution hallucinations.
+        """
+        pred_curr = logits[stage].argmax(dim=1)
+        if stage == 0:
+            return pred_curr
+            
+        unanimous_background = torch.ones_like(pred_curr, dtype=torch.bool)
+        for j in range(stage):
+            pred_j = logits[j].argmax(dim=1)
+            unanimous_background = unanimous_background & (pred_j == 0)
+            
+        return torch.where((pred_curr == 1) & unanimous_background, torch.zeros_like(pred_curr), pred_curr)
+
 
 # ==============================================================================
 # Training
@@ -902,7 +920,8 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
         'Entropy-Gated (Soft)',
         'Resolution-Aware Voting',
         'Resolution-Aware Bayes',
-        'Resolution-Aware Soft'
+        'Resolution-Aware Soft',
+        'Consensus Veto'
     ]
     matrices = {m: [np.zeros((nc, nc), dtype=np.int64) for _ in range(ne)]
                 for m in methods}
@@ -962,6 +981,9 @@ def run_evaluation(val_loader, model, engine: TeamworkSegmentationEngine,
 
                 p_ra_s = engine.predict_resolution_aware_soft(aligned, s, weights=engine.exit_weights).cpu().numpy()
                 matrices['Resolution-Aware Soft'][s] += compute_confusion_matrix(p_ra_s, tgt_np, nc)
+
+                p_cv = engine.predict_consensus_veto(aligned, s).cpu().numpy()
+                matrices['Consensus Veto'][s] += compute_confusion_matrix(p_cv, tgt_np, nc)
 
             if save_images_dir and evaluated < num_images_to_save:
                 os.makedirs(save_images_dir, exist_ok=True)
